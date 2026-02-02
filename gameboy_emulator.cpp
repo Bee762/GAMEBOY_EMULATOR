@@ -159,6 +159,7 @@ if (flag_name == 'Z') return F & (1 << 7);
 else if (flag_name == 'N') return F & (1 << 6);
 else if (flag_name == 'H') return F & (1 << 5);
 else if (flag_name == 'C') return F & (1 << 4);
+else return 0; //if there are no matches return 0;
 //our i just want want specific value 0 or 1 ,my return gets the correct binary but returns 
 //it as it is so it can be translated to 0 or the actual value of binary(128 for zero flag).we only want 0 and 1 hence return type
 //is bool,anything > 0  is 1.
@@ -169,6 +170,8 @@ else if (flag_name == 'C') return F & (1 << 4);
 //and alu stores it result to either A register or to memory (ram)
 
 //Arithmetic Logic Unit : 
+
+//arithmetic operations : can write back to memory adress or register depending on operation
 
 void alu_add (uint8_t& register1 , uint8_t& register2) {
 
@@ -461,7 +464,7 @@ void alu_inc_memory (uint8_t& register1 , uint8_t& register2) {
 
     uint16_t paired_register = pair_registers (register1,register2);
 
-    uint16_t value = mem.read_memory(paired_register);
+    uint8_t value = mem.read_memory(paired_register);
 
     value++;
 
@@ -504,7 +507,7 @@ void alu_dec_memory (uint8_t& register1 , uint8_t& register2) {
 
     uint16_t paired_register = pair_registers (register1,register2);
 
-    uint16_t value = mem.read_memory(paired_register);
+    uint8_t value = mem.read_memory(paired_register);
 
     value--;
 
@@ -525,4 +528,469 @@ void alu_dec_paired_reg (uint16_t& register1) {
  register1--;
 }
 
+//comparision operations :
+
+void compare_reg (uint8_t& register1, uint8_t& register2) {
+    uint16_t result = register1 - register2;
+
+     if (static_cast<uint8_t>(result) == 0) set_flag ('Z', 1);
+    else set_flag ('Z', 0);
+
+    set_flag ('N', 1);
+
+    if ( (register1 & 0xF) < (register2 & 0xF) ) set_flag ('H', 1); //checking if half overflow has happened
+    else set_flag ('H', 0);
+
+    if (register1 < register2) set_flag ('C', 1);
+    else set_flag ('C', 0);
+
+    //result  will be scrapped its only to update flags
+}
+
+void compare_reg_memory_adress (uint8_t& register1, uint8_t& register2, uint8_t& register3) {
+
+    uint16_t paired_register = pair_registers (register2,register3);
+
+    uint8_t value = mem.read_memory(paired_register);
+    uint16_t result = register1 - value;
+
+     if (static_cast<uint8_t>(result) == 0) set_flag ('Z', 1);
+    else set_flag ('Z', 0);
+
+    set_flag ('N', 1);
+
+    if ( (register1 & 0xF) < (value & 0xF) ) set_flag ('H', 1); //checking if half overflow has happened
+    else set_flag ('H', 0);
+
+    if (register1 < value) set_flag ('C', 1);
+    else set_flag ('C', 0);
+
+    //result  will be scrapped its only to update flags
+}
+
+// logical operations : always writes  back at register A
+// i will use register as a param but alu will write back logical operators
+//at A register
+
+//logical alu operations have hardwired flag behaviour unlike arithmetic operations
+//only need to check zero flag rest are hardwired
+
+void alu_and(uint8_t& register1 , uint8_t value) {
+    register1 &= value;
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',1); //half carry is 1 in and operation(cpu design)
+
+    set_flag ('C',0); //carry is 0 because  bit cant overflow in logical operations
+}
+
+void alu_and_memory_adress(uint8_t& register1 , uint8_t& register2, uint8_t& register3) {
+
+    uint16_t adress = pair_registers(register2,register3);
+    uint8_t value = mem.read_memory(adress);
+
+    register1 = register1 & value;
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',1); //half carry is 1 in and operation(cpu design)
+
+    set_flag ('C',0); //carry is 0 because  bit cant overflow in logical operations
+}
+
+void alu_or(uint8_t& register1 , uint8_t value) {
+    register1 |= value;
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); //half carry is 0 in or operation(cpu design)
+
+    set_flag ('C',0); //carry is 0 because  bit cant overflow in logical operations
+}
+
+void alu_or_memory_adress(uint8_t& register1 , uint8_t& register2, uint8_t& register3) {
+
+    uint16_t adress = pair_registers(register2,register3);
+    uint8_t value = mem.read_memory(adress);
+
+    register1 = register1 | value;
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); //half carry is 0 in or operation(cpu design)
+
+    set_flag ('C',0); //carry is 0 because  bit cant overflow in logical operations
+}
+
+void alu_xor(uint8_t& register1 , uint8_t value) {
+    register1 ^= value;
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); //half carry is 0 in xor operation(cpu design)
+
+    set_flag ('C',0); //carry is 0 because  bit cant overflow in logical operations
+}
+
+void alu_xor_memory_adress(uint8_t& register1 , uint8_t& register2, uint8_t& register3) {
+
+    uint16_t adress = pair_registers(register2,register3);
+    uint8_t value = mem.read_memory(adress);
+
+    register1 = register1 ^ value;
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); //half carry is 0 in xor operation(cpu design)
+
+    set_flag ('C',0); //carry is 0 because  bit cant overflow in logical operations
+}
+
+//rotational operations : 
+
+void alu_rotate_left_circular (uint8_t& register1) {
+    //shift bits by 1 left, bit is wrapped around ,and felled of bits goes
+    //into carry and rightmost bit
+
+    bool fallen_bit = (register1 >> 7);  //so if i shift everyting right by 7 only last bit can have non 
+    //zero value and storing it in a boolean.
+
+    register1 = (register1 << 1) | fallen_bit;
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit); 
+
+}
+
+void alu_rotate_left_circular_memory_adress(uint8_t& register1, uint8_t& register2) {
+    uint16_t adress = pair_registers(register1,register2);
+    uint8_t value = mem.read_memory(adress);
+
+    bool fallen_bit = (value >> 7);
+
+    value = (value << 1) | fallen_bit;
+
+    mem.write_memory(adress,value);
+
+    if (value == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+}
+
+void alu_rotate_right_circular (uint8_t& register1) {
+    //shift bits by 1 right, bit is wrapped around ,and felled of bits goes
+    //into carry and leftmost bit
+
+    bool fallen_bit = (register1 & 0x01);  //so if i shift everyting right by 7 only last bit can have non 
+    //zero value and storing it in a boolean.
+
+    register1 = (register1 >> 1) | (fallen_bit << 7);
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0);
+
+    set_flag ('C',fallen_bit); 
+
+}
+
+void alu_rotate_right_circular_memory_adress(uint8_t& register1, uint8_t& register2) {
+    uint16_t adress = pair_registers(register1,register2);
+    uint8_t value = mem.read_memory(adress);
+
+    bool fallen_bit = (value & 0x01);
+
+    value = (value >> 1) | (fallen_bit << 7);
+
+    mem.write_memory(adress,value);
+
+    if (value == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+}
+
+void alu_rotate_left_carry(uint8_t& register1) {
+    bool old_carry = get_flag('C');
+    bool fallen_bit = (register1 >> 7);
+
+    register1 = (register1 << 1) | old_carry;
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+
+}
+
+void alu_rotate_left_carry_memory_adress(uint8_t& register1,uint8_t& register2) {
+    bool old_carry = get_flag('C');
+
+    uint16_t adress = pair_registers(register1,register2);
+    uint8_t value = mem.read_memory(adress);
+
+    bool fallen_bit = (value >> 7);
+
+    value = (value << 1) | old_carry;
+
+    mem.write_memory(adress,value);
+
+    if (value == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+
+}
+
+void alu_rotate_right_carry(uint8_t& register1) {
+    bool old_carry = get_flag('C');
+    bool fallen_bit = (register1 & 0x01);
+
+    register1 = (register1 >> 1) | (old_carry << 7);
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+
+}
+
+void alu_rotate_right_carry_memory_adress(uint8_t& register1,uint8_t& register2) {
+    bool old_carry = get_flag('C');
+
+    uint16_t adress = pair_registers(register1,register2);
+    uint8_t value = mem.read_memory(adress);
+
+    bool fallen_bit = (value & 0x01);
+
+    value = (value >> 1) | (old_carry << 7);
+
+    mem.write_memory(adress,value);
+
+    if (value == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+
+}
+
+//shift operations : 
+
+void alu_shift_left (uint8_t& register1) {
+    bool fallen_bit = (register1 >> 7);
+    register1 <<= 1;
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+}
+
+void alu_shift_left_memory_adress (uint8_t& register1,uint8_t& register2) {
+    uint16_t adress = pair_registers(register1,register2);
+    uint8_t value = mem.read_memory(adress);
+
+    bool fallen_bit = (value >> 7);
+    value <<= 1;
+    mem.write_memory(adress,value);
+
+    if (value == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+}
+
+void alu_shift_right (uint8_t& register1) {
+    //for signed ints,preserve leftmost bit to preserve sign
+    bool fallen_bit = (register1 & 0x01);
+    bool preserved_bit = (register1 >> 7);
+    register1 = (register1 >> 1) | (static_cast<uint8_t>(preserved_bit) << 7);
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+}
+
+void alu_shift_right_memory_adress (uint8_t& register1,uint8_t& register2) {
+    uint16_t adress = pair_registers(register1,register2);
+    uint8_t value = mem.read_memory(adress);
+
+    bool fallen_bit = (value & 0x01);
+    bool preserved_bit = (value >> 7);
+    value = (value >> 1) | (static_cast<uint8_t>(preserved_bit) << 7);
+
+    mem.write_memory(adress,value);
+
+    if (value == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+}
+
+void alu_shift_right_logical (uint8_t& register1) {
+    //same as shift right but not preserve rightmost bit
+    bool fallen_bit = (register1 & 0x01);
+
+    register1 >>= 1;
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+}
+
+void alu_shift_right_logical_memory_adress (uint8_t& register1,uint8_t& register2) {
+    uint16_t adress = pair_registers(register1,register2);
+    uint8_t value = mem.read_memory(adress);
+
+    bool fallen_bit = (value & 0x01);
+    value >>= 1;
+    mem.write_memory(adress,value);
+
+    if (value == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',fallen_bit);
+}
+
+void alu_swap (uint8_t& register1) {
+    //swap upper nibble with lower nibble
+    register1 = (register1 << 4) | (register1 >> 4);
+
+    if (register1 == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',0);
+}
+
+void alu_swap_memory (uint8_t& register1 ,uint8_t& register2) {
+    //swap upper nibble with lower nibble
+    uint16_t adress = pair_registers(register1,register2);
+    uint8_t value = mem.read_memory(adress);
+
+    value = (value << 4) | (value >> 4);
+
+    mem.write_memory(adress,value);
+
+    if (value == 0x00) set_flag ('Z',1);
+    else set_flag ('Z',0);
+
+    set_flag ('N',0);
+
+    set_flag ('H',0); 
+
+    set_flag ('C',0);
+}
+
+//special operations : 
+
+void alu_complement_reg (uint8_t& register1) {
+    register1 = ~register1;//just flips bits in a register
+    set_flag('N',1);//coz its like subtraction
+    set_flag('H',1);
+    //zero flag and carry flag remains unchanged
+}
+
+void alu_set_carry_flag() {
+    set_flag('C',1);//just sets carry flag to 1
+    //these flags are cleared
+    set_flag('N',0);
+    set_flag('H',0);
+}
+
+void alu_complement_carry_flag() {
+    bool carry_flag = get_flag('C');
+    set_flag ('C',~carry_flag);//just complements carry flag
+    //these flags are cleared
+    set_flag('N',0);
+    set_flag('H',0);
+}
+
+
 };
+
+void todo_list () {
+//implement DAA in alu to implement bcd arithmetic
+}
