@@ -363,6 +363,7 @@ void alu_sub_carry(uint8_t& register1 , uint8_t& register2) {
     set_flag ('N', 1);
 
     if ( (register1 & 0xF) < ((register2 & 0xF) + carry_flag)) set_flag ('H', 1);
+    else set_flag('H', 0);
 
     if (register1 < (register2 + carry_flag)) set_flag ('C', 1);
     else set_flag ('C', 0);
@@ -1041,8 +1042,164 @@ void alu_daa(uint8_t& register1) {
     set_flag ('H',0);
 }
 
+//now lets write opcode fetching and execution.
+
+uint8_t fetch_opcode () {
+    IR = mem.read_memory(PC); //store opcode in instruction register
+    PC++;//increment programm counter
+    return IR; //return it
+}
+
+
+uint32_t execute_opcode () {
+
+ uint8_t opcode = fetch_opcode();
+
+ if (opcode == 0b01110110) {
+    //halt :  0b01110110 is cpu a instruction called halt so we skip this
+    //will add this later 
+    return 0;//temporary return 
+ }
+
+//ld opcodes :
+
+ // load register opcodes (ld r r') means r = r',means add value of reg r' in r register
+ //they have a fixed pattern they start with 0b01 next bit is first r and last 3 bit are 2nd r
+ //depending on that we load a register
+
+ //ld r r' : load register r with value of register r'
+ //opcode : 0b01xxxyyyy (x,y = variable)
+
+ else if ((opcode & 0b11000000) == 0b01000000) {  //masking first 2 digit and letting 01 in only
+    //now lets get value of last register and store it in value (r')
+    uint8_t value = 0b00000000;
+    uint8_t last_register = opcode & 0b00000111; //only keep last 3 bbits
+
+     if (last_register == 0b000) value = B; //here 000 after 0b represents last 3 bits from right(in lower nibble)
+     else if (last_register == 0b001) value = C;
+     else if (last_register == 0b010) value = D;
+     else if (last_register == 0b011) value = E;
+     else if (last_register == 0b100) value = H;
+     else if (last_register == 0b101) value = L;
+     else if (last_register == 0b110) value = mem.read_memory(pair_registers(H,L)); //value at memory adress pointed by (HL)
+     else if (last_register == 0b111) value = A;
+
+     //now lets assign value in designated register (ld r)
+
+     uint8_t first_register = (opcode >> 3) & 0b00000111;
+      //rightshifting by 3 removes last 3 bit and shifts bit 3-5 t0 6-8
+     //and masking with 111 keeps last 3 bits only and rest are forced to zero
+    //0b011 = 0b00000011 and != 0b01100000 remember this,also every other bit before 011 will be assigned to zero
+
+     if (first_register == 0b000) B = value;
+     else if (first_register == 0b001) C = value;
+     else if (first_register == 0b010) D = value;
+     else if (first_register == 0b011) E = value;
+     else if (first_register == 0b100) H = value;
+     else if (first_register == 0b101) L = value;
+     else if (first_register == 0b110) mem.write_memory(pair_registers(H,L),value);
+      //0b01110110 is already skipped as halt
+      //also it translates to ld (hl) (hl) means write value stored by adress hl to adress hl,it does nothing anyways
+      //thats why cpu uses this specific binary as halt
+     else if (first_register == 0b111) A = value;
+
+     //now we need to write machine cycles taken to execute this opcode as return statement
+
+        if (first_register == 0b110) return 2;  //ld (hl) r takes 2 machine cycles
+        else if (last_register == 0b110) return 2;  // ld r (hl) takes 2 machine cycles
+        else return 1; // ld r r' takes 1 machine cycle
+
+
+     //this takes care of all ld r r' instructions
+ }
+
+
+ //ld r , n : load register r with immediate value n from next opcode,so it will take 2 byte cycle of fetch decode execute
+ //byte cycle means how many times i need to fetch opcode it doesnot means machine cycle
+ //opcode range 0b00xxx110 (x = variable),
+
+ else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00000111) == 0b00000110) {
+    uint8_t reg = (opcode >> 3) & 0b00000111;//storing data of register 
+    uint8_t n = fetch_opcode();//getting value of n
+
+     if (reg == 0b000) B = n;
+     else if (reg == 0b001) C = n;
+     else if (reg == 0b010) D = n;
+     else if (reg == 0b011) E = n;
+     else if (reg == 0b100) H = n;
+     else if (reg == 0b101) L = n;
+     else if (reg == 0b110) mem.write_memory(pair_registers(H,L),n);
+     else if (reg == 0b111) A = n;
+
+     //return statements
+       
+     if (reg == 0b110) return 3; //ld (hl) n returns 3 machine cycle
+     else return 2; //ld r n takes 2 machine cycle to execute
+
+ }
+
+
+ //ld a (bc) : load a from memory adress pointed by bc(1 byte cycle 2 machine cycle)
+ //opcode : 0b00001010
+
+ else if (opcode == 0b00001010) {
+    A = mem.read_memory(pair_registers(B,C));
+    return 2;
+ }
+
+ //ld a (de) : load a from memory adress pointed by de(1 byte cycle 2 machine cycle)
+ //opcode : 0b00011010
+
+ else if (opcode == 0b00011010) {
+    A = mem.read_memory(pair_registers(D,E));
+    return 2;
+ }
+
+ //ld (bc) a : load memory adress pointed by bc with value at a (1 byte cycle 2 machine cycle)
+ //opcode : 0b00000010
+
+ else if (opcode == 0b00000010) {
+    mem.write_memory(pair_registers(B,C),A);
+    return 2;
+ }
+
+ //ld (de) a : load memory adress pointed by de with value at a (1 byte cycle 2 machine cycle)
+ //opcode : 0b00010010
+
+ else if (opcode == 0b00010010) {
+    mem.write_memory(pair_registers(D,E),A);
+    return 2;
+ }
+
+ //ld a (nn) : load register a with value from adress specified by nn(3 byte cycle 4 machine cycle)
+ //first n is actually low byte and second n is highbyte,accordin to cpu instruction
+ //opcode : 0b11111010
+ 
+ else if (opcode == 0b11111010) {
+    uint8_t n1 = fetch_opcode();//low byte (first n)
+    uint8_t n2 = fetch_opcode();//high byte (second n)
+    //n1 and n2 are immediate value (nn) = (n2 n1)
+    A = mem.read_memory(pair_registers(n2,n1)); //n1 and n2 are not registers but they will use same concept
+    //but in pair register (a,b) a is used as high byte as we will use n2 as highbyte so n2 first
+    return 4;
+ }
+
+ //ld (nn) a : load adress (nn) with data in a (3 byte cycle and 4 machine cycle)
+ //opcode : 0b11101010
+
+ else if (opcode == 0b11101010) {
+    uint8_t n1 = fetch_opcode();
+    uint8_t n2 = fetch_opcode();
+    mem.write_memory(pair_registers(n2,n1),A);
+    return 4;
+ }
+
+
+
+}
+
 };
 
 void todo_list () {
-//implement DAA in alu to implement bcd arithmetic
+//halt should execute before ld even starts
 }
