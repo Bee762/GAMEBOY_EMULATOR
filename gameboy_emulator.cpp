@@ -466,9 +466,21 @@ void alu_inc_memory (uint8_t& register1 , uint8_t& register2) {
 
     uint8_t value = mem.read_memory(paired_register);
 
+    uint8_t old_value = value;//preserving old value for half carry check
+
+
     value++;
 
     mem.write_memory(paired_register,value);
+
+    if (value == 0) set_flag ('Z', 1);
+    else set_flag ('Z', 0);
+
+    set_flag ('N', 0);
+
+    if ((old_value & 0xF) == 0xF ) set_flag ('H', 1); //checking if half overflow has happened
+    else set_flag ('H', 0);
+
 
     //no flags will be touched here
 
@@ -509,11 +521,19 @@ void alu_dec_memory (uint8_t& register1 , uint8_t& register2) {
 
     uint8_t value = mem.read_memory(paired_register);
 
+    uint8_t old_value = value;//preserving old value for half carry check
+
     value--;
 
     mem.write_memory(paired_register,value);
 
-    //no flags will be touched here
+    if (value == 0) set_flag ('Z', 1);
+    else set_flag ('Z', 0);
+
+    set_flag ('N', 1);
+
+    if ((old_value & 0xF) == 0x0 ) set_flag ('H', 1); //checking if half overflow has happened
+    else set_flag ('H', 0);
 
 }
 
@@ -988,6 +1008,38 @@ void alu_complement_carry_flag() {
     set_flag('H',0);
 }
 
+void alu_daa(uint8_t& register1) {
+    uint8_t result = register1;
+    bool carry_flag = get_flag('C');
+    bool half_carry_flag = get_flag('H');
+    bool subtract_flag = get_flag('N');
+
+    //check condition with actual variable and modify copy
+
+    if (!subtract_flag) {
+
+        if (half_carry_flag || (register1 & 0x0F) > 0x09) result+= 0x06;
+         if (carry_flag || register1 > 0x99) {
+            result += 0x60;
+            set_flag('C',1);
+         }
+         else set_flag ('C',0);
+        register1 = result;
+    }
+
+    else {
+         if (half_carry_flag) result-= 0x06;
+           if (carry_flag) {
+            result -= 0x60;
+            }
+        register1 = result;
+        set_flag ('C',carry_flag); //carry flag will be preserved in subtraction
+        }
+    if (register1 == 0x00) set_flag('Z',1);
+    else set_flag('Z',0);
+
+    set_flag ('H',0);
+}
 
 };
 
