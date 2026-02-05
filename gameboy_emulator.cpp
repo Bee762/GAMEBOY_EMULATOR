@@ -151,7 +151,7 @@ F &= ~(1 << 4);
 F |= flag_C;
 }
 //we dont care about bit 0-3,ignore them
-
+F &= 0xF0; //forcing lower nibble to zero
 }//func end
 
 bool get_flag (char flag_name) {
@@ -551,7 +551,7 @@ void alu_dec_paired_reg (uint16_t& register1) {
 
 //comparision operations :
 
-void compare_reg (uint8_t& register1, uint8_t& register2) {
+void alu_compare_reg (uint8_t& register1, uint8_t& register2) {
     uint16_t result = register1 - register2;
 
      if (static_cast<uint8_t>(result) == 0) set_flag ('Z', 1);
@@ -568,7 +568,7 @@ void compare_reg (uint8_t& register1, uint8_t& register2) {
     //result  will be scrapped its only to update flags
 }
 
-void compare_reg_memory_adress (uint8_t& register1, uint8_t& register2, uint8_t& register3) {
+void alu_compare_reg_memory_adress (uint8_t& register1, uint8_t& register2, uint8_t& register3) {
 
     uint16_t paired_register = pair_registers (register2,register3);
 
@@ -1300,8 +1300,11 @@ uint32_t execute_opcode () {
  else if (opcode == 0b00001000) {
     uint8_t lowbyte = fetch_opcode();//first n aka next opcode is actually lowbyte (cpu design)
     uint8_t highbyte = fetch_opcode();
-
-    mem.write_memory(pair_registers(highbyte,lowbyte),SP);
+    //we will split sp in two 8 bit int because memory cant store 16 bit data
+    uint16_t adress = pair_registers(highbyte,lowbyte);
+    mem.write_memory(adress,SP & 0x00FF);  //low byte in memory ,
+    adress++;
+    mem.write_memory(adress,((SP >> 8) & 0x00FF));  //high byte in memory ,
 
     return 5;
  }
@@ -1397,6 +1400,290 @@ uint32_t execute_opcode () {
  }
 
  // ld operations end
+
+ // alu operations : 
+
+ //additions : 
+
+ //add r : add register r with a and store result back in a (1byte cycle 1 machine cycle)
+ //opcode : 0b10000xxx
+
+ else if ((opcode & 0b11111000) == 0b10000000) {
+     uint8_t r= opcode & 0b00000111; //only keep last 3 bbits
+
+     if (r == 0b000) alu_add(A,B);
+     else if (r == 0b001) alu_add(A,C);
+     else if (r == 0b010) alu_add(A,D);
+     else if (r == 0b011) alu_add(A,E);
+     else if (r == 0b100) alu_add(A,H);
+     else if (r == 0b101) alu_add(A,L);
+     else if (r == 0b110) alu_add_memory_adress(A,H,L);
+     else if (r == 0b111) alu_add(A,A);
+
+      //return 
+       if (r == 0b110) return 2;
+       else return 1;
+ }
+
+ //add n : add register a with immediate value n and store back in a(2 byte cycle 2 machine cycle)
+ //opcode = 0b11000110
+
+ else if (opcode == 0b11000110) {
+    uint8_t n = fetch_opcode();
+    alu_add (A,n);
+    return 2;
+ }
+
+ //adc r : add a to register r with carry flag store back at a (1 byte cycle 1 machine cycle)
+ //opcode = 0b10001xxx
+
+ else if ((opcode & 0b11111000) == 0b10001000) {
+    uint8_t r= opcode & 0b00000111; //only keep last 3 bbits
+
+     if (r == 0b000) alu_add_carry(A,B);
+     else if (r == 0b001) alu_add_carry(A,C);
+     else if (r == 0b010) alu_add_carry(A,D);
+     else if (r == 0b011) alu_add_carry(A,E);
+     else if (r == 0b100) alu_add_carry(A,H);
+     else if (r == 0b101) alu_add_carry(A,L);
+     else if (r == 0b110) alu_add_memory_adress_carry(A,H,L);
+     else if (r == 0b111) alu_add_carry(A,A);
+
+      //return 
+       if (r == 0b110) return 2;
+       else return 1;
+ }
+
+ //adc n : add immediate value n to a with carry flag (2 byte cycle,2 machine cycle)
+ //opcode = 0b11001110
+
+ else if (opcode == 0b11001110) {
+    uint8_t n = fetch_opcode();
+    alu_add_carry(A,n);
+    return 2;
+ }
+
+ //subtract 
+
+ //sub r : subtract 8 bit register a with r and store result in a (1 byte cycle,1 machine cycle)
+ //opcode : 0b10010xxx
+
+ else if ((opcode & 0b11111000) == 0b10010000) {
+     uint8_t r= opcode & 0b00000111; //only keep last 3 bbits
+
+     if (r == 0b000) alu_sub(A,B);
+     else if (r == 0b001) alu_sub(A,C);
+     else if (r == 0b010) alu_sub(A,D);
+     else if (r == 0b011) alu_sub(A,E);
+     else if (r == 0b100) alu_sub(A,H);
+     else if (r == 0b101) alu_sub(A,L);
+     else if (r == 0b110) alu_sub_memory_adress(A,H,L);
+     else if (r == 0b111) alu_sub(A,A);
+
+      //return 
+       if (r == 0b110) return 2;
+       else return 1;
+
+ }
+
+ //sub n : sub register a with immediate value n and store back in a(2 byte cycle 2 machine cycle)
+ //opcode = 0b11010110
+
+ else if (opcode == 0b11010110) {
+    uint8_t n = fetch_opcode();
+    alu_sub (A,n);
+    return 2;
+ }
+
+ //sbc r : sub a to register r with carry flag store back at a (1 byte cycle 1 machine cycle)
+ //opcode = 0b10011xxx
+
+ else if ((opcode & 0b11111000) == 0b10011000) {
+    uint8_t r= opcode & 0b00000111; //only keep last 3 bbits
+
+     if (r == 0b000) alu_sub_carry(A,B);
+     else if (r == 0b001) alu_sub_carry(A,C);
+     else if (r == 0b010) alu_sub_carry(A,D);
+     else if (r == 0b011) alu_sub_carry(A,E);
+     else if (r == 0b100) alu_sub_carry(A,H);
+     else if (r == 0b101) alu_sub_carry(A,L);
+     else if (r == 0b110) alu_sub_memory_adress_carry(A,H,L);
+     else if (r == 0b111) alu_sub_carry(A,A);
+
+       //return 
+       if (r == 0b110) return 2;
+       else return 1;
+ }
+
+ //sbc n : sub immediate value n to a with carry flag (2 byte cycle,2 machine cycle)
+ //opcode = 0b11011110
+
+ else if (opcode == 0b11011110) {
+    uint8_t n = fetch_opcode();
+    alu_sub_carry(A,n);
+    return 2;
+ }
+
+ //comparisions : 
+
+ // cp r : sub a with r and dont store results just update flags(1 byte cycle, 1 machine cycle)
+ //opcode : 0b10111xxx
+
+ else if ((opcode & 0b11111000) == 0b10111000) {
+     uint8_t r= opcode & 0b00000111; //only keep last 3 bbits
+
+     if (r == 0b000) alu_compare_reg(A,B);
+     else if (r == 0b001) alu_compare_reg(A,C);
+     else if (r == 0b010) alu_compare_reg(A,D);
+     else if (r == 0b011) alu_compare_reg(A,E);
+     else if (r == 0b100) alu_compare_reg(A,H);
+     else if (r == 0b101) alu_compare_reg(A,L);
+     else if (r == 0b110) alu_compare_reg_memory_adress(A,H,L);
+     else if (r == 0b111) alu_compare_reg(A,A);
+
+       //return 
+       if (r == 0b110) return 2;
+       else return 1;
+ }
+
+ //cp n : sub a immediate value n to a with carry flag dont update result change flags(2 byte cycle,2 machine cycle)
+ //opcode = 0b11111110
+
+ else if (opcode == 0b11111110) {
+    uint8_t n = fetch_opcode();
+    alu_compare_reg(A,n);
+    return 2;
+ }
+
+ //increment : inc r -> increment register and store back (1 byte cycle 1 machine cycle)
+ //opcode : 0b00xxx100
+
+ else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00000111) == 0b00000100) {
+    uint8_t r= (opcode >> 3) & 0b00000111; //only keep last 3 bbits
+
+     if (r == 0b000) alu_inc_reg(B);
+     else if (r == 0b001) alu_inc_reg(C);
+     else if (r == 0b010) alu_inc_reg(D);
+     else if (r == 0b011) alu_inc_reg(E);
+     else if (r == 0b100) alu_inc_reg(H);
+     else if (r == 0b101) alu_inc_reg(L);
+     else if (r == 0b110) alu_inc_memory(H,L);
+     else if (r == 0b111) alu_inc_reg(A);
+
+      //return 
+       if (r == 0b110) return 3;  //inc (hl) takes 3 machine cycle
+       else return 1;
+ }
+
+  //decrement : dec r -> decrement register and store back (1 byte cycle 1 machine cycle)
+ //opcode : 0b00xxx101
+
+ else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00000111) == 0b00000101) {
+    uint8_t r= (opcode >> 3) & 0b00000111; //only keep last 3 bbits
+
+     if (r == 0b000) alu_dec_reg(B);
+     else if (r == 0b001) alu_dec_reg(C);
+     else if (r == 0b010) alu_dec_reg(D);
+     else if (r == 0b011) alu_dec_reg(E);
+     else if (r == 0b100) alu_dec_reg(H);
+     else if (r == 0b101) alu_dec_reg(L);
+     else if (r == 0b110) alu_dec_memory(H,L);
+     else if (r == 0b111) alu_dec_reg(A);
+
+      //return 
+       if (r == 0b110) return 3;  //inc (hl) takes 3 machine cycle
+       else return 1;
+ }
+
+ // logical operations :
+
+ //and r : perform bitwise and on a with r and store in a (1 byte cycle,1 machine cycle)
+ //opcode : 0b10100xxx
+
+ else if ((opcode & 0b11111000) == 0b10100000 ) {
+    uint8_t r= opcode & 0b00000111; //only keep last 3 bbits
+
+     if (r == 0b000) alu_and(A,B);
+     else if (r == 0b001) alu_and(A,C);
+     else if (r == 0b010) alu_and(A,D);
+     else if (r == 0b011) alu_and(A,E);
+     else if (r == 0b100) alu_and(A,H);
+     else if (r == 0b101) alu_and(A,L);
+     else if (r == 0b110) alu_and_memory_adress(A,H,L);
+     else if (r == 0b111) alu_and(A,A);
+
+      //return 
+       if (r == 0b110) return 2; 
+       else return 1;
+ }
+
+ //and n : and a immediate value n to a (2 byte cycle,2 machine cycle)
+ //opcode = 0b11100110
+
+ else if (opcode == 0b11100110) {
+    uint8_t n = fetch_opcode();
+    alu_and(A,n);
+    return 2;
+ }
+
+ //or r : perform bitwise or on a with r and store in a (1 byte cycle,1 machine cycle)
+ //opcode : 0b10110xxx
+
+ else if ((opcode & 0b11111000) == 0b10110000 ) {
+    uint8_t r= opcode & 0b00000111; //only keep last 3 bbits
+
+     if (r == 0b000) alu_or(A,B);
+     else if (r == 0b001) alu_or(A,C);
+     else if (r == 0b010) alu_or(A,D);
+     else if (r == 0b011) alu_or(A,E);
+     else if (r == 0b100) alu_or(A,H);
+     else if (r == 0b101) alu_or(A,L);
+     else if (r == 0b110) alu_or_memory_adress(A,H,L);
+     else if (r == 0b111) alu_or(A,A);
+
+      //return 
+       if (r == 0b110) return 2; 
+       else return 1;
+ }
+
+ //or n : or a immediate value n to a (2 byte cycle,2 machine cycle)
+ //opcode = 0b11110110
+
+ else if (opcode == 0b11110110) {
+    uint8_t n = fetch_opcode();
+    alu_or(A,n);
+    return 2;
+ }
+
+ //xor r : perform bitwise xor on a with r and store in a (1 byte cycle,1 machine cycle)
+ //opcode : 0b10101xxx
+
+ else if ((opcode & 0b11111000) == 0b10101000 ) {
+    uint8_t r= opcode & 0b00000111; //only keep last 3 bbits
+
+     if (r == 0b000) alu_xor(A,B);
+     else if (r == 0b001) alu_xor(A,C);
+     else if (r == 0b010) alu_xor(A,D);
+     else if (r == 0b011) alu_xor(A,E);
+     else if (r == 0b100) alu_xor(A,H);
+     else if (r == 0b101) alu_xor(A,L);
+     else if (r == 0b110) alu_xor_memory_adress(A,H,L);
+     else if (r == 0b111) alu_xor(A,A);
+
+      //return 
+       if (r == 0b110) return 2; 
+       else return 1;
+ }
+
+ //xor n : xor a immediate value n to a (2 byte cycle,2 machine cycle)
+ //opcode = 0b11101110
+
+ else if (opcode == 0b11101110) {
+    uint8_t n = fetch_opcode();
+    alu_xor(A,n);
+    return 2;
+ }
+
 
 
  return 0;
