@@ -1003,7 +1003,7 @@ void alu_set_carry_flag() {
 
 void alu_complement_carry_flag() {
     bool carry_flag = get_flag('C');
-    set_flag ('C',~carry_flag);//just complements carry flag
+    set_flag ('C',!carry_flag);//just complements carry flag(inverse the true or false)
     //these flags are cleared
     set_flag('N',0);
     set_flag('H',0);
@@ -1061,7 +1061,7 @@ uint32_t execute_opcode () {
     return 0;//temporary return 
  }
 
-//ld opcodes :
+//ld opcodes : 8 bit load operations :
 
  // load register opcodes (ld r r') means r = r',means add value of reg r' in r register
  //they have a fixed pattern they start with 0b01 next bit is first r and last 3 bit are 2nd r
@@ -1087,9 +1087,9 @@ uint32_t execute_opcode () {
      //now lets assign value in designated register (ld r)
 
      uint8_t first_register = (opcode >> 3) & 0b00000111;
-      //rightshifting by 3 removes last 3 bit and shifts bit 3-5 t0 6-8
-     //and masking with 111 keeps last 3 bits only and rest are forced to zero
-    //0b011 = 0b00000011 and != 0b01100000 remember this,also every other bit before 011 will be assigned to zero
+       //rightshifting by 3 removes last 3 bit and shifts bit 3-5 t0 6-8
+      //and masking with 111 keeps last 3 bits only and rest are forced to zero
+     //0b011 = 0b00000011 and != 0b01100000 remember this,also every other bit before 011 will be assigned to zero
 
      if (first_register == 0b000) B = value;
      else if (first_register == 0b001) C = value;
@@ -1194,12 +1194,220 @@ uint32_t execute_opcode () {
     return 4;
  }
 
+ //ldh a (c) : load A with high memory adress specified by c,
+ //high memory means the high stream it ranges from 0xFF00 to 0xFFFF,it is used for I/O management in gameboy
+ //opcode : 0b11110010               (2 machine cycle 1 byte cycle)
+
+ else if (opcode == 0b11110010) {
+    A = mem.read_memory(0xFF00 + C); //just making sure memory stays in range of 0xFF00 - 0xFFFF
+    //as c is 8 bit int the result highbyte stays 0xFF
+    return 2;
+ }
+
+ //ldh (c) a : load high memory adress c with a (1 byte cycle 2 machine cycle)
+ //opcode : 0b11100010
+
+ else if (opcode == 0b11100010) {
+    mem.write_memory(C+0xFF00,A);
+    return 2;
+ }
+
+ //ldh a (n) : load a with high memory (n) (2 byte cycle 3 machine cycle)
+ //opcode = 0b11110000
+
+ else if (opcode == 0b11110000) {
+    uint8_t n = fetch_opcode();
+    A = mem.read_memory(0xFF00+n);
+    return 3;
+ }
+
+ //ldh (n) a : load high memory adress n with a (2 byte cycle 3 machine cycle)
+ //opcode = 0b11100000
+
+ else if (opcode == 0b11100000) {
+    uint8_t n = fetch_opcode();
+    mem.write_memory(0xFF00+n,A);
+    return 3;
+ }
+
+ //ldh a (hl-) : load a with adress (hl),then decrement hl and store(1 byte cycle 2 machine cycle)
+ //opcode : 0b00111010
+
+ else if (opcode == 0b00111010) {
+    uint16_t hl = pair_registers(H,L);
+    A = mem.read_memory(hl);
+    hl--;
+    split_registers(H,L,hl);
+    return 2;
+ }
+
+ //ld (hl-) a : load adress hl with a and then decrement hl and store (1 byte cycle 2 machine cycle)
+ //opcode : 0b00110010
+
+ else if (opcode == 0b00110010) {
+    uint16_t hl = pair_registers(H,L);
+    mem.write_memory(hl,A);
+    hl--;
+    split_registers(H,L,hl);
+    return 2;
+ }
+
+ //ldh a (hl+) : load a with adress (hl),then increment hl and store(1 byte cycle 2 machine cycle)
+ //opcode : 0b00101010
+
+ else if (opcode == 0b00101010) {
+    uint16_t hl = pair_registers(H,L);
+    A = mem.read_memory(hl);
+    hl++;
+    split_registers(H,L,hl);
+    return 2;
+ }
+
+ //ld (hl+) a : load adress hl with a and then increment hl and store (1 byte cycle 2 machine cycle)
+ //opcode : 0b00100010
+
+ else if (opcode == 0b00100010) {
+    uint16_t hl = pair_registers(H,L);
+    mem.write_memory(hl,A);
+    hl++;
+    split_registers(H,L,hl);
+    return 2;
+ }
+
+ //ld opcodes : 16 bit load instructions :
+
+ //ld rr nn : load 16 bit register rr' with 16 bit immediate data nn (3 byte cycle , 3 machine cycle)
+ //opcode : 0b00xx0001
+
+ else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00001111) == 0b00000001) {
+    uint8_t reg = (opcode >> 4) & 0b00000011; //storing data of register r
+    //now lets get nn
+    uint8_t lowbyte = fetch_opcode();//first n aka next opcode is actually lowbyte (cpu design)
+    uint8_t highbyte = fetch_opcode();
+    uint16_t nn = pair_registers(highbyte,lowbyte); //storing nn 
+
+    if (reg == 0b00) split_registers(B,C,nn);//split nn into b and c register
+    else if (reg == 0b01) split_registers(D,E,nn);
+    else if (reg == 0b10) split_registers(H,L,nn);
+    else if (reg == 0b11) SP = nn;  //storing 16 bit value in stack pointer
+    
+    return 3;
+ }
+
+ //ld (nn) sp : load adress (nn) with value from stack pointer (3 byte cycle , 5 machine cycle)
+ //opcode : 0b00001000
+
+ else if (opcode == 0b00001000) {
+    uint8_t lowbyte = fetch_opcode();//first n aka next opcode is actually lowbyte (cpu design)
+    uint8_t highbyte = fetch_opcode();
+
+    mem.write_memory(pair_registers(highbyte,lowbyte),SP);
+
+    return 5;
+ }
+
+ //ld sp hl : load stack pointer with data from hl register (1 byte cycle , 2 machine cycle)
+ //opcode : 0b11111001
+
+ else if (opcode == 0b11111001) {
+    SP = pair_registers(H,L);
+    return 2;
+ }
+
+ //push rr : push to stack -> push data from 16 bit registers to memory adress pointed by sp
+ //opcode : 0b11xx0101 (1 byte cycle 4 machine cycle) 
+
+ else if ((opcode & 0b11000000) == 0b11000000 && (opcode & 0b00001111) == 0b00000101) {
+    SP--; //because we will write at memory ,sp had an adress from before so we move to next empty space
+    //we are using decrement because stack starts at higher adress and grows lower (cpu designers choice).
+    uint8_t rr = (opcode >> 4) & 0b00000011;
+
+    if (rr == 0b00) { // BC register
+    mem.write_memory(SP,B); //memory can store 1 byte at a adress as its 8 bit
+    SP--; // so we decrement sp again to go to next adjacent slot
+    mem.write_memory(SP,C); //and store 2nd register value there instead of pairing and storing
+    }
+
+    else if (rr == 0b01) { //DE register
+    mem.write_memory(SP,D); 
+    SP--; 
+    mem.write_memory(SP,E); 
+    }
+
+    else if (rr == 0b10) { //HL register
+    mem.write_memory(SP,H); 
+    SP--; 
+    mem.write_memory(SP,L); 
+    }
+
+    else if (rr == 0b11) { //AF register
+    mem.write_memory(SP,A); 
+    SP--; 
+    mem.write_memory(SP,F & 0xF0);  // we only need first 4 bit of flag,lower bit is masked to zero
+    }
+
+    return 4;
+ }
+
+ //pop rr : pop from stack -> pop data from stack to 16 bit register (1 byte cycle 3 machine cycle)
+ //opcode : 0b11xx0001
+
+ else if ((opcode & 0b11000000) == 0b11000000 && (opcode & 0b00001111) == 0b00000001) {
+    uint8_t lowbyte = mem.read_memory(SP);
+    SP++;
+    uint8_t highbyte = mem.read_memory(SP);
+    SP++; //sp always points at next data to pop,so pop can be called again
+
+    uint16_t stack_data = pair_registers(highbyte,lowbyte);//pairing high and lowbyte
+    uint8_t rr = (opcode >> 4) & 0b00000011; //storing paired register data
+
+    if (rr == 0b00) split_registers(B,C,stack_data);
+    else if (rr == 0b01) split_registers(D,E,stack_data);
+    else if (rr == 0b10) split_registers(H,L,stack_data);
+    else if (rr == 0b11) {
+    split_registers(A,F,stack_data);
+    F &= 0xF0; //removing lower nibble as it needs to stay zero
+    }
+
+    return 3;
+ }
+
+ //ld hl,sp+e : load hl with stackpointer value + e where e is immediate signed  int (not unsigned)
+ //opcode : 0b11111000; (2 byte cycle,3 machine cycle)
+
+ else if (opcode == 0b11111000) {
+    int8_t e = fetch_opcode();
+    uint32_t HL = SP + e;
+    //this operation sets flag 
+    //clears z and n flag and sets carry and half carry flag
+    set_flag('Z',0);
+    set_flag('N',0);
+
+    if ((SP & 0xF) + (e & 0xF) > 0xF) set_flag('H',1);
+    else set_flag('H',0);
+
+    if ((SP & 0xFF) + (e & 0xFF) > 0xFF) set_flag('C',1);
+    else set_flag('C',0);
+
+    uint16_t result = static_cast <uint16_t> (HL);
+
+    split_registers(H,L,result);
+
+    return 3;
+ }
+
+ // ld operations end
 
 
-}
+ return 0;
+}//function end
 
 };
 
 void todo_list () {
 //halt should execute before ld even starts
+}
+
+int main () {
+
 }
