@@ -1684,7 +1684,317 @@ uint32_t execute_opcode () {
     return 2;
  }
 
+ //special instructions :
 
+ //ccf : flips the carry flag and clears h and n flag (1 byte cycle,1 machine cycle)
+ //opcode : 0b00111111
+
+ else if (opcode == 0b00111111) {
+    alu_complement_carry_flag();
+    return 1;
+ }
+
+ //scf : sets the carry flag and clears n and h flag (1 byte cycle 1 machine cycle)
+ //opcode : 0b00110111
+
+ else if (opcode == 0b00110111) {
+    alu_set_carry_flag();
+    return 1;
+ }
+
+ //daa : decimal adjust accumulator,used to fix a register for bcd arithmetic(1 byte cycle,1 machine cycle)
+ //opcode : 0b00100111
+
+ else if (opcode == 0b00100111) {
+    alu_daa(A); // we will only apply daa for a register as it has a fixed opcode and it only applies on
+    //a register where the result of a operation is stored mostly
+    return 1;
+ }
+
+ //cpl : flips all bits in 8 bit register and sets n and h flags (1 byte cycle,1 machine cycle)
+ //opcode : 0b00101111
+
+ else if (opcode == 0b00101111) {
+    alu_complement_reg(A);
+    return 1;
+ }
+
+ //16 bit arithmetic operations : 
+
+ // inc rr (1 byte cycle 2 machine cycle)
+ //opcode = 0b00xx0011
+
+ else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00001111) == 0b00000011) {
+    uint8_t rr = (opcode >> 4) & 0b00000011;
+
+     if (rr == 0b00) alu_inc_paired_reg(B,C);
+     else if (rr == 0b01) alu_inc_paired_reg(D,E);
+     else if (rr == 0b10) alu_inc_paired_reg(H,L);
+     else if (rr == 0b11) SP++;
+
+     return 2;
+ }
+
+ // dec rr (1 byte cycle 2 machine cycle)
+ //opcode = 0b00xx1011
+
+ else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00001111) == 0b00001011) {
+    uint8_t rr = (opcode >> 4) & 0b00000011;
+
+     if (rr == 0b00) alu_dec_paired_reg(B,C);
+     else if (rr == 0b01) alu_dec_paired_reg(D,E);
+     else if (rr == 0b10) alu_dec_paired_reg(H,L);
+     else if (rr == 0b11) SP--;
+
+     return 2;
+ }
+
+ // add hl,rr : add rr to hl and store result back into hl (1 byte cycle,2 machine cycle)
+ //opcode : 0b00xx1001
+
+ else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00001111) == 0b00001001) {
+    uint8_t rr = (opcode >> 4) & 0b00000011;
+
+     if (rr == 0b00) alu_add_paired_reg(H,L,B,C);
+     else if (rr == 0b01) alu_add_paired_reg(H,L,D,E);
+     else if (rr == 0b10) alu_add_paired_reg(H,L,H,L);
+     else if (rr == 0b11) alu_add_paired_reg(H,L,SP);
+
+     return 2;
+ }
+
+ // add sp,e : add sp to signed int e from next opcode (2 byte cycle,4 machine cycle)
+ //opcode : 0b11101000
+
+ else if (opcode == 0b11101000) {
+    int8_t e = fetch_opcode();
+
+    set_flag ('Z',0);
+    set_flag ('N',0);
+    if ((SP & 0x0F) + (e & 0x0F) > 0x0F) set_flag('H',1);
+    else set_flag('H',0);
+    if ((SP & 0xFF) + (e & 0xFF) > 0xFF) set_flag('C',1);
+    else set_flag('C',0);
+
+    SP += e;
+
+    return 4;
+ }
+
+ //rotate,shift and swap operations : 
+
+ // RLCA : rotate left circular (accumulator),same as rlc r but always set z flag to 0
+ //opcode : 0b00000111        (1 byte cycle,1 machine cycle)
+
+ else if (opcode == 0b00000111) {
+    alu_rotate_left_circular(A);
+    set_flag('Z',0);
+    return 1;
+ }
+
+  // RRCA : rotate left circular (accumulator),same as rRc r but always set z flag to 0
+ //opcode : 0b00001111        (1 byte cycle,1 machine cycle)
+
+ else if (opcode == 0b00001111) {
+    alu_rotate_right_circular(A);
+    set_flag('Z',0);
+    return 1;
+ }
+
+ // RLA : rotate left  (accumulator),same as rL r but always set z flag to 0
+ //opcode : 0b00010111        (1 byte cycle,1 machine cycle)
+
+ else if (opcode == 0b00010111) {
+    alu_rotate_left_carry(A);
+    set_flag('Z',0);
+    return 1;
+ }
+
+ // RRA : rotate right  (accumulator),same as rr r but always set z flag to 0
+ //opcode : 0b00011111        (1 byte cycle,1 machine cycle)
+
+ else if (opcode == 0b00011111) {
+    alu_rotate_right_carry(A);
+    set_flag('Z',0);
+    return 1;
+ }
+
+
+ //cb opcodes : if opcodes starts with 0xcb the next opcode actually have instruction
+
+ else if (opcode == 0xCB) {
+
+  uint8_t cb_opcode = fetch_opcode();
+
+    //RLC r : rotates 8 bit register r value to left in circular manner (2 byte cycle,2 mqchine cycle) 
+   //opcode : 0xCB >> 0b00000xxx 
+  //this is a cb opcode means the current opcode will contaon 0XCB and the next opcode will have instruction
+
+     if ((cb_opcode & 0b11111000) == 0b00000000) {
+    uint8_t r= (cb_opcode & 0b00000111); //only keep last 3 bbits
+
+     if (r == 0b000) alu_rotate_left_circular(B);
+     else if (r == 0b001) alu_rotate_left_circular(C);
+     else if (r == 0b010) alu_rotate_left_circular(D);
+     else if (r == 0b011) alu_rotate_left_circular(E);
+     else if (r == 0b100) alu_rotate_left_circular(H);
+     else if (r == 0b101) alu_rotate_left_circular(L);
+     else if (r == 0b110) alu_rotate_left_circular_memory_adress(H,L);
+     else if (r == 0b111) alu_rotate_left_circular(A);
+
+      //return 
+       if (r == 0b110) return 4; 
+       else return 2;
+    }
+
+    //RRC r : rotates 8 bit register r value to right in circular manner (2 byte cycle,2 mqchine cycle) 
+   //opcode : 0xCB >> 0b00001xxx 
+  //this is a cb opcode means the current opcode will contain 0XCB and the next opcode will have instruction
+
+     else if ((cb_opcode & 0b11111000) == 0b00001000) {
+    uint8_t r= (cb_opcode & 0b00000111); //only keep last 3 bbits
+
+     if (r == 0b000) alu_rotate_right_circular(B);
+     else if (r == 0b001) alu_rotate_right_circular(C);
+     else if (r == 0b010) alu_rotate_right_circular(D);
+     else if (r == 0b011) alu_rotate_right_circular(E);
+     else if (r == 0b100) alu_rotate_right_circular(H);
+     else if (r == 0b101) alu_rotate_right_circular(L);
+     else if (r == 0b110) alu_rotate_right_circular_memory_adress(H,L);
+     else if (r == 0b111) alu_rotate_right_circular(A);
+
+      //return 
+       if (r == 0b110) return 4; 
+       else return 2;
+    }
+
+    //RL r : rotates 8 bit register r value to left with carry flag (2 byte cycle,2 mqchine cycle) 
+   //opcode : 0xCB >> 0b00010xxx 
+  //this is a cb opcode means the current opcode will contain 0XCB and the next opcode will have instruction
+
+     else if ((cb_opcode & 0b11111000) == 0b00010000) {
+    uint8_t r= (cb_opcode & 0b00000111); //only keep last 3 bbits
+
+     if (r == 0b000) alu_rotate_left_carry(B);
+     else if (r == 0b001) alu_rotate_left_carry(C);
+     else if (r == 0b010) alu_rotate_left_carry(D);
+     else if (r == 0b011) alu_rotate_left_carry(E);
+     else if (r == 0b100) alu_rotate_left_carry(H);
+     else if (r == 0b101) alu_rotate_left_carry(L);
+     else if (r == 0b110) alu_rotate_left_carry_memory_adress(H,L);
+     else if (r == 0b111) alu_rotate_left_carry(A);
+
+      //return 
+       if (r == 0b110) return 4; 
+       else return 2;
+    }
+
+    //RR r : rotates 8 bit register r value to right with carry flag (2 byte cycle,2 mqchine cycle) 
+   //opcode : 0xCB >> 0b00011xxx 
+  //this is a cb opcode means the current opcode will contain 0XCB and the next opcode will have instruction
+
+     else if ((cb_opcode & 0b11111000) == 0b00011000) {
+    uint8_t r= (cb_opcode & 0b00000111); //only keep last 3 bbits
+
+     if (r == 0b000) alu_rotate_right_carry(B);
+     else if (r == 0b001) alu_rotate_right_carry(C);
+     else if (r == 0b010) alu_rotate_right_carry(D);
+     else if (r == 0b011) alu_rotate_right_carry(E);
+     else if (r == 0b100) alu_rotate_right_carry(H);
+     else if (r == 0b101) alu_rotate_right_carry(L);
+     else if (r == 0b110) alu_rotate_right_carry_memory_adress(H,L);
+     else if (r == 0b111) alu_rotate_right_carry(A);
+
+      //return 
+       if (r == 0b110) return 4; 
+       else return 2;
+    }
+
+    //sla r : shifts the 8 bit register by 1 left (2 byte cycle,2 machine cycle)
+   //opcode : 0xCB >> 0b00100xxx 
+  //this is a cb opcode means the current opcode will contain 0XCB and the next opcode will have instruction
+
+   else if ((cb_opcode & 0b11111000) == 0b00100000) {
+    uint8_t r= (cb_opcode & 0b00000111); //only keep last 3 bbits
+
+     if (r == 0b000) alu_shift_left(B);
+     else if (r == 0b001) alu_shift_left(C);
+     else if (r == 0b010) alu_shift_left(D);
+     else if (r == 0b011) alu_shift_left(E);
+     else if (r == 0b100) alu_shift_left(H);
+     else if (r == 0b101) alu_shift_left(L);
+     else if (r == 0b110) alu_shift_left_memory_adress(H,L);
+     else if (r == 0b111) alu_shift_left(A);
+
+      //return 
+       if (r == 0b110) return 4; 
+       else return 2;
+    }
+
+    //sra r : shifts the 8 bit register by 1 right (2 byte cycle,2 machine cycle)
+   //opcode : 0xCB >> 0b00101xxx 
+  //this is a cb opcode means the current opcode will contain 0XCB and the next opcode will have instruction
+
+   else if ((cb_opcode & 0b11111000) == 0b00101000) {
+    uint8_t r= (cb_opcode & 0b00000111); //only keep last 3 bbits
+
+     if (r == 0b000) alu_shift_right(B);
+     else if (r == 0b001) alu_shift_right(C);
+     else if (r == 0b010) alu_shift_right(D);
+     else if (r == 0b011) alu_shift_right(E);
+     else if (r == 0b100) alu_shift_right(H);
+     else if (r == 0b101) alu_shift_right(L);
+     else if (r == 0b110) alu_shift_right_memory_adress(H,L);
+     else if (r == 0b111) alu_shift_right(A);
+
+      //return 
+       if (r == 0b110) return 4; 
+       else return 2;
+    }
+
+    //sla r : shifts the 8 bit register by 1 right logical (2 byte cycle,2 machine cycle)
+   //opcode : 0xCB >> 0b00111xxx 
+  //this is a cb opcode means the current opcode will contain 0XCB and the next opcode will have instruction
+
+   else if ((cb_opcode & 0b11111000) == 0b00111000) {
+    uint8_t r= (cb_opcode & 0b00000111); //only keep last 3 bbits
+
+     if (r == 0b000) alu_shift_right_logical(B);
+     else if (r == 0b001) alu_shift_right_logical(C);
+     else if (r == 0b010) alu_shift_right_logical(D);
+     else if (r == 0b011) alu_shift_right_logical(E);
+     else if (r == 0b100) alu_shift_right_logical(H);
+     else if (r == 0b101) alu_shift_right_logical(L);
+     else if (r == 0b110) alu_shift_right_logical_memory_adress(H,L);
+     else if (r == 0b111) alu_shift_right_logical(A);
+
+      //return 
+       if (r == 0b110) return 4; 
+       else return 2;
+    }
+
+    // swap r : swap the upper and lower nibble in register (2 byte cycle,2 machine cycle)
+   //opcode : 0xCB >> 0b00110xxx 
+
+   else if ((cb_opcode & 0b11111000) == 0b00110000) {
+    uint8_t r= (cb_opcode & 0b00000111); //only keep last 3 bbits
+
+     if (r == 0b000) alu_swap(B);
+     else if (r == 0b001) alu_swap(C);
+     else if (r == 0b010) alu_swap(D);
+     else if (r == 0b011) alu_swap(E);
+     else if (r == 0b100) alu_swap(H);
+     else if (r == 0b101) alu_swap(L);
+     else if (r == 0b110) alu_swap_memory(H,L);
+     else if (r == 0b111) alu_swap(A);
+
+      //return 
+       if (r == 0b110) return 4; 
+       else return 2;
+    }
+
+  return 0;
+}
 
  return 0;
 }//function end
