@@ -985,6 +985,28 @@ void alu_swap_memory (uint8_t& register1 ,uint8_t& register2) {
     set_flag ('C',0);
 }
 
+void alu_test_bit (uint8_t ref_reg,uint8_t bit_mask) { //bitmask will be used as 0b00100000 for 5th bit testing
+    bool result = (ref_reg & bit_mask); //storing final data as 0 or 1 as thats whhat we need later
+    if (result == 0) set_flag('Z',1);
+    else set_flag('Z',0);
+
+    set_flag('N',0);
+    set_flag ('H',1);
+
+}
+
+void alu_reset_bit (uint8_t& ref_reg,uint8_t bit_mask) {
+    //resets bit b to zero
+    ref_reg &= (~bit_mask); // we will use bitmask as 0b01000000 to locate bit 6 so flip it and mask
+    //no flags will be  touched
+}
+
+void alu_set_bit (uint8_t& ref_reg,uint8_t bit_mask) {
+    //sets bit b to 1
+    ref_reg |= bit_mask; // we will use bitmask as 0b01000000 to locate bit 6 so flip it and mask
+    //no flags will be  touched
+}
+
 //special operations : 
 
 void alu_complement_reg (uint8_t& register1) {
@@ -1993,8 +2015,124 @@ uint32_t execute_opcode () {
        else return 2;
     }
 
+    //BIT b,r : test bit register 
+    //tests the bit b  of a register r , if b is 0 it sets the z flag to 1 else z flag is set to zero
+    //n flag is set to 0 and h is set to 1 (2 byte cycle,2 machine cycle)
+    //opcode = 0xcb >> 0b01xxxxxx 
+
+    else if ((cb_opcode & 0b11000000) == 0b01000000) {
+        uint8_t bit = (cb_opcode >> 3) & 0b00000111;
+        uint8_t r = cb_opcode & 0b00000111;
+
+        uint8_t* reg_pointer = nullptr;
+        uint8_t value = 0;
+
+        if (r == 0b110) value = mem.read_memory(pair_registers(H,L));  //stores value of paired hl for future
+
+      if (r == 0b000) reg_pointer = &B;
+      else if (r == 0b001) reg_pointer = &C;
+      else if (r == 0b010) reg_pointer = &D;
+      else if (r == 0b011) reg_pointer = &E;
+      else if (r == 0b100) reg_pointer = &H;
+      else if (r == 0b101) reg_pointer = &L;
+      else if (r == 0b110) reg_pointer = &value;
+      else if (r == 0b111) reg_pointer = &A;
+
+      if (bit == 0b000) alu_test_bit(*reg_pointer,0b00000001);
+      else if (bit == 0b001) alu_test_bit(*reg_pointer,0b00000010);
+      else if (bit == 0b010) alu_test_bit(*reg_pointer,0b00000100);
+      else if (bit == 0b011) alu_test_bit(*reg_pointer,0b00001000);
+      else if (bit == 0b100) alu_test_bit(*reg_pointer,0b00010000);
+      else if (bit == 0b101) alu_test_bit(*reg_pointer,0b00100000);
+      else if (bit == 0b110) alu_test_bit(*reg_pointer,0b01000000);
+      else if (bit == 0b111) alu_test_bit(*reg_pointer,0b10000000);
+
+      //return 
+       if (r == 0b110) return 3;
+       else return 2;
+    }
+
+    //res b,r : reset bit register 
+    //resets the bit b  of a register r , (2 byte cycle,2 machine cycle)
+    //opcode = 0xcb >> 0b10xxxxxx 
+
+    else if ((cb_opcode & 0b11000000) == 0b10000000) {
+        uint8_t bit = (cb_opcode >> 3) & 0b00000111;
+        uint8_t r = cb_opcode & 0b00000111;
+
+        uint8_t* reg_pointer = nullptr; // reg pointer
+
+         uint8_t value = 0;
+         if (r==0b110) value = mem.read_memory(pair_registers(H,L)); //read from memory and store value for memory operation
+
+      if (r == 0b000) reg_pointer = &B;
+      else if (r == 0b001) reg_pointer = &C;
+      else if (r == 0b010) reg_pointer = &D;
+      else if (r == 0b011) reg_pointer = &E;
+      else if (r == 0b100) reg_pointer = &H;
+      else if (r == 0b101) reg_pointer = &L;
+      else if (r == 0b110) reg_pointer = &value;
+      else if (r == 0b111) reg_pointer = &A;
+
+      if (bit == 0b000) alu_reset_bit(*reg_pointer,0b00000001);
+      else if (bit == 0b001) alu_reset_bit(*reg_pointer,0b00000010);
+      else if (bit == 0b010) alu_reset_bit(*reg_pointer,0b00000100);
+      else if (bit == 0b011) alu_reset_bit(*reg_pointer,0b00001000);
+      else if (bit == 0b100) alu_reset_bit(*reg_pointer,0b00010000);
+      else if (bit == 0b101) alu_reset_bit(*reg_pointer,0b00100000);
+      else if (bit == 0b110) alu_reset_bit(*reg_pointer,0b01000000);
+      else if (bit == 0b111) alu_reset_bit(*reg_pointer,0b10000000);
+
+      //return 
+       if (r == 0b110) {
+        mem.write_memory(pair_registers(H,L),value); //for memory operations write back
+        return 4;
+       }
+       else return 2;
+    }
+
+    //set b,r : sets bit register 
+    //sets the bit b  of a register r to 1 , (2 byte cycle,2 machine cycle)
+    //opcode = 0xcb >> 0b11xxxxxx 
+
+    else if ((cb_opcode & 0b11000000) == 0b11000000) {
+        uint8_t bit = (cb_opcode >> 3) & 0b00000111;
+        uint8_t r = cb_opcode & 0b00000111;
+
+        uint8_t* reg_pointer = nullptr; // reg pointer
+     
+         uint8_t value = 0;
+         if (r==0b110) value = mem.read_memory(pair_registers(H,L)); //read from memory and store value for memory operation
+
+
+      if (r == 0b000) reg_pointer = &B;
+      else if (r == 0b001) reg_pointer = &C;
+      else if (r == 0b010) reg_pointer = &D;
+      else if (r == 0b011) reg_pointer = &E;
+      else if (r == 0b100) reg_pointer = &H;
+      else if (r == 0b101) reg_pointer = &L;
+      else if (r == 0b110) reg_pointer = &value;
+      else if (r == 0b111) reg_pointer = &A;
+
+      if (bit == 0b000) alu_set_bit(*reg_pointer,0b00000001);
+      else if (bit == 0b001) alu_set_bit(*reg_pointer,0b00000010);
+      else if (bit == 0b010) alu_set_bit(*reg_pointer,0b00000100);
+      else if (bit == 0b011) alu_set_bit(*reg_pointer,0b00001000);
+      else if (bit == 0b100) alu_set_bit(*reg_pointer,0b00010000);
+      else if (bit == 0b101) alu_set_bit(*reg_pointer,0b00100000);
+      else if (bit == 0b110) alu_set_bit(*reg_pointer,0b01000000);
+      else if (bit == 0b111) alu_set_bit(*reg_pointer,0b10000000);
+
+      //return 
+       if (r == 0b110) {
+        mem.write_memory(pair_registers(H,L),value); //for memory operations write back
+        return 4;
+       }
+       else return 2;
+    }
+
   return 0;
-}
+ }//cb opcodes end
 
  return 0;
 }//function end
