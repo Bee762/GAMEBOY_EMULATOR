@@ -1072,6 +1072,12 @@ uint8_t fetch_opcode () {
     return IR; //return it
 }
 
+int8_t fetch_rawbyte () { //for getting signed int when needed
+    IR = mem.read_memory(PC); //store opcode in instruction register
+    PC++;//increment programm counter
+    return IR; //return it
+}
+
 
 uint32_t execute_opcode () {
 
@@ -1401,7 +1407,7 @@ uint32_t execute_opcode () {
  //opcode : 0b11111000; (2 byte cycle,3 machine cycle)
 
  else if (opcode == 0b11111000) {
-    int8_t e = fetch_opcode();
+    int8_t e = fetch_rawbyte();
     uint32_t HL = SP + e;
     //this operation sets flag 
     //clears z and n flag and sets carry and half carry flag
@@ -1789,7 +1795,7 @@ uint32_t execute_opcode () {
  //opcode : 0b11101000
 
  else if (opcode == 0b11101000) {
-    int8_t e = fetch_opcode();
+    int8_t e = fetch_rawbyte();
 
     set_flag ('Z',0);
     set_flag ('N',0);
@@ -2132,7 +2138,291 @@ uint32_t execute_opcode () {
     }
 
   return 0;
+
  }//cb opcodes end
+
+ // regular opcodes continue here : 
+
+ //control flow instructions : 
+
+ //jp nn : jump -> unconditional jump to absolute adress specified by absolute adress specified by immediate value nn
+ //opcode : 0b11000011    (3 byte cycle,4 machine cycle)
+
+ else if (opcode == 0b11000011) {
+    uint8_t lowbyte = fetch_opcode();
+    uint8_t highbyte = fetch_opcode();
+
+    PC = pair_registers(highbyte,lowbyte);
+
+    return 4;
+ }
+
+ //jp HL : unconditional jump to adress specified by HL (1 byte cycle,1 machine cycle)
+ //opcode : 0b11101001
+
+ else if (opcode == 0b11101001) {
+    PC = pair_registers(H,L);
+    return 1;
+ }
+
+ //jp cc,nn : conditional jump to the absolute adress specified by nn depending on condition cc
+ //operand is read even when condition is false 
+ //opcode  = 0b110xx010              (3 byte cycle and (4 machine cycle if cc is true or 3 byte cycle if cc is false))
+ //gameboy cpu is 4 conditiions and only zero and carry flags are used (zero,not zero,carry,not carry)
+
+ else if ((opcode & 0b11100000) == 0b11000000 && (opcode & 0b00000111) == 0b00000010) {
+    bool z_flag = get_flag('Z');
+    bool C_flag = get_flag('C');
+
+    uint8_t lowbyte = fetch_opcode();
+    uint8_t highbyte = fetch_opcode();
+
+    uint8_t cc = (opcode >> 3) & 0b00000011;
+
+    if (cc == 0b00) { //NZ = not zero
+         if (!z_flag) {
+            PC = pair_registers(highbyte,lowbyte);
+            return 4;
+         }
+         else return 3;
+    }
+
+    else if (cc == 0b01) { //Z = zero
+        if (z_flag) {
+             PC = pair_registers(highbyte,lowbyte);
+            return 4;
+        }
+        else return 3;
+    }
+
+    else if (cc == 0b10) { //NC = not carry
+        if (!C_flag) {
+             PC = pair_registers(highbyte,lowbyte);
+            return 4;
+        }
+        else return 3;
+    }
+
+    else if (cc == 0b11) { //C = carry
+        if (C_flag) {
+             PC = pair_registers(highbyte,lowbyte);
+            return 4;
+        }
+        else return 3;
+    }
+    return 3; //just fr safety 
+ }
+
+ //JR e : jump to the relative adress specified by 8 bit signed operand e (2 byte cycle,3 machine cycle)
+ //opcode = 0b00011000
+
+ else if (opcode == 0b00011000) {
+    int8_t e = fetch_rawbyte ();
+    PC += e;
+    return 3;
+ }
+
+ //jr cc e : jump to the relativve adress specified by 8 bit operand e depending on cc
+ //opcode = 0b001xx000                    (2 byte cycle,(3 machine cycle if cc is true,2 if cc is false))
+
+ else if ((opcode & 0b11100000) == 0b00100000 && (opcode & 0b00000111) == 0b00000000) {
+    bool z_flag = get_flag('Z');
+    bool C_flag = get_flag('C');
+
+    int8_t e = fetch_rawbyte();
+
+    uint8_t cc = (opcode >> 3) & 0b00000011;
+
+    if (cc == 0b00) { //NZ = not zero
+         if (!z_flag) {
+            PC += e;
+            return 3;
+         }
+         else return 2;
+    }
+
+    else if (cc == 0b01) { //Z = zero
+        if (z_flag) {
+              PC += e;
+              return 3;
+        }
+        else return 2;
+    }
+
+    else if (cc == 0b10) { //NC = not carry
+        if (!C_flag) {
+              PC += e;
+              return 3;
+        }
+        else return 2;
+    }
+
+    else if (cc == 0b11) { //C = carry
+        if (C_flag) {
+              PC += e;
+              return 3;
+        }
+        else return 2;
+    }
+    return 2; //just fr safety 
+ }
+
+ //call nn : call function -> unconditional function call to the absolute adress specified by nn
+ //opcode : 0b11001101           (3 byte cycle,6 machine cycle)
+
+ else if (opcode == 0b11001101) {
+    uint8_t lowbyte = fetch_opcode();
+    uint8_t highbyte = fetch_opcode();
+
+    SP--; //move to next empty space in stack pointer
+    mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+    SP--; //stack grows downward
+    mem.write_memory (SP,PC & 0xFF);
+
+    PC = pair_registers(highbyte,lowbyte);
+
+    return 6;
+ }
+
+ //call cc,nn : conditional call (3 byte cycle,(6 machine cycle if cc true or 3 machine cycle if cc false))
+ //opcode : 0b110xx100
+
+ else if ((opcode & 0b11100000) == 0b11000000 && (opcode & 0b00000111) == 0b00000100) {
+    bool z_flag = get_flag('Z');
+    bool C_flag = get_flag('C');
+
+    uint8_t lowbyte = fetch_opcode();
+    uint8_t highbyte = fetch_opcode();
+
+    uint8_t cc = (opcode >> 3) & 0b00000011;
+
+    if (cc == 0b00) { //NZ = not zero
+         if (!z_flag) {
+        SP--; //move to next empty space in stack pointer
+        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        SP--; //stack grows downward
+        mem.write_memory (SP,PC & 0xFF);
+        PC = pair_registers(highbyte,lowbyte);
+        return 6;
+        }
+         else return 3;
+    }
+
+    else if (cc == 0b01) { //Z = zero
+        if (z_flag) {
+        SP--; //move to next empty space in stack pointer
+        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        SP--; //stack grows downward
+        mem.write_memory (SP,PC & 0xFF);
+        PC = pair_registers(highbyte,lowbyte);
+        return 6;
+        }
+         else return 3;
+    }
+    
+
+    else if (cc == 0b10) { //NC = not carry
+        if (!C_flag) {
+        SP--; //move to next empty space in stack pointer
+        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        SP--; //stack grows downward
+        mem.write_memory (SP,PC & 0xFF);
+        PC = pair_registers(highbyte,lowbyte);
+        return 6;
+        }
+         else return 3;
+    }
+
+
+    else if (cc == 0b11) { //C = carry
+        if (C_flag) {
+        SP--; //move to next empty space in stack pointer
+        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        SP--; //stack grows downward
+        mem.write_memory (SP,PC & 0xFF);
+        PC = pair_registers(highbyte,lowbyte);
+        return 6;
+        }
+         else return 3;
+    }
+    return 3; //just fr safety 
+ }
+
+ // ret : unconditional return from a function (1 byte cycle,4 machine cycle) 
+ //opcode : 0b11001001
+
+ else if (opcode == 0b11001001) {
+    uint8_t lowbyte = mem.read_memory(SP);
+    SP++;
+    uint8_t highbyte = mem.read_memory(SP);
+    SP++;
+    PC = pair_registers (highbyte,lowbyte);
+    return 4;
+ }
+
+ //ret cc : return from function conditional (1 byte cycle (5 machine cycle if cc true or 2 machine cycle if cc false))
+ //opcode : 0b110xx000
+
+ else if ((opcode & 0b11100000) == 0b11000000 && (opcode & 0b00000111) == 0b00000000) {
+    bool z_flag = get_flag('Z');
+    bool C_flag = get_flag('C');
+
+    uint8_t cc = (opcode >> 3) & 0b00000011;
+
+    if (cc == 0b00) { //NZ = not zero
+         if (!z_flag) {
+         uint8_t lowbyte = mem.read_memory(SP);
+         SP++;
+         uint8_t highbyte = mem.read_memory(SP);
+         SP++;
+         PC = pair_registers (highbyte,lowbyte);
+         return 5;
+        }
+         else return 2;
+    }
+
+    else if (cc == 0b01) { //Z = zero
+        if (z_flag) {
+         uint8_t lowbyte = mem.read_memory(SP);
+         SP++;
+         uint8_t highbyte = mem.read_memory(SP);
+         SP++;
+         PC = pair_registers (highbyte,lowbyte);
+         return 5;
+        }
+         else return 2;
+    }
+    
+
+    else if (cc == 0b10) { //NC = not carry
+        if (!C_flag) {
+         uint8_t lowbyte = mem.read_memory(SP);
+         SP++;
+         uint8_t highbyte = mem.read_memory(SP);
+         SP++;
+         PC = pair_registers (highbyte,lowbyte);
+         return 5;
+        }
+         else return 2;
+    }
+
+
+    else if (cc == 0b11) { //C = carry
+        if (C_flag) {
+         uint8_t lowbyte = mem.read_memory(SP);
+         SP++;
+         uint8_t highbyte = mem.read_memory(SP);
+         SP++;
+         PC = pair_registers (highbyte,lowbyte);
+         return 5;
+        }
+         else return 2;
+    }
+    return 2; //just fr safety 
+ }
+
+
+
 
  return 0;
 }//function end
