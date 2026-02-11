@@ -2,6 +2,7 @@
 #include <string>
 #include <iostream>
 #include <cstdint>
+#include <chrono>
 
 struct memory {
 memory () {
@@ -24,7 +25,7 @@ memory () {
 bool map_rom_cartridge() {
 //for more documentation read microsofts memory mapped io in windows
 
-game_file = CreateFileA("Pokemon-Red.gb",GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_READONLY,NULL);
+game_file = CreateFileA("cpu_instrs.gb",GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_READONLY,NULL);
 //if handle generation fails it returns invalid_handle_value.
 if (game_file == INVALID_HANDLE_VALUE) {
     std::cerr << "HANDLE CREATION FOR GAMEFILE FAILED" << std::endl;
@@ -76,15 +77,52 @@ uint8_t read_memory (uint16_t adress) const {  //read from cartridge rom
     //rom memory adress in gameboy : 0x0000 to 0x7FFF
 }
 
-void write_memory(uint16_t adress, uint8_t value) {  //write into gameboy memory
-    if (adress >= 0x8000) ram[adress - 0x8000] = value; //only write in ram
+
+void write_memory(uint16_t address, uint8_t value) {
+    // Normal RAM write
+    if (address >= 0x8000 && address < 0x8000 + sizeof(ram))
+        ram[address - 0x8000] = value;
+
+    // Serial output for Blargg test
+    if (address == 0xFF01) {
+        char output = static_cast<char>(value);
+        std::cout << output;
+        std::cout.flush(); // make sure it prints immediately
+    }
+    //cpu writting to div resets it
+    if (address == 0xFF04) {
+        DIV = 0;
+        div_counter = 0;
+    }
+    //cpu writes to tima during overflow stops tima reload
+    if (address == 0xFF05) {
+        TIMA = value;
+        tima_overflow = false;
+    }
+    if (address == 0xFF06) {
+       TMA = value;
+    }
+    if (address == 0xFF07) {
+       TAC = value;
+    }
+
 }
+
 
 HANDLE game_file = nullptr; //storing handle outside the functon so they can be closed later.
 HANDLE game_rom = nullptr;
 uint8_t* rom_adress = nullptr; // the starting adress of mapped rom.
 
-uint8_t ram [32768];   //gameboy memory .
+uint8_t ram [32768];   //gameboy memory.
+
+uint8_t& DIV  =  ram [0xFF04 - 0x8000];
+uint8_t& TIMA = ram [0xFF05 - 0x8000];
+uint8_t& TMA  =  ram [0xFF06 - 0x8000];
+uint8_t& TAC  =  ram [0xFF07 - 0x8000];
+
+uint16_t div_counter = 0x0000;
+uint8_t tima_reload_delay = 0;
+bool tima_overflow = false;
 
 bool mapping_status = false;
 
@@ -93,21 +131,69 @@ bool mapping_status = false;
 struct cpu {
 //gameboy uses Sharp LR35902 cpu,it has 8 bit architecture
 
-memory mem;
+    memory mem;
+
+cpu () { 
+ //constructor initialises the variables after bootram
+   PC = 0X0100;
+   SP = 0XFFFE;
+
+   A = 0X01;
+   F = 0XB0;
+   B = 0X00;
+   C = 0X13;
+   D = 0X00;
+   E = 0XD8;
+   H = 0X01;
+   L = 0X4D;
+
+   IF = 0b00000000;
+   IE = 0b00011111;
+
+   IME = false;
+   IME_scheduled = false;
+   ime_pending = false;
+   halted = false;
+   interupt_pending = false;
+
+   mem.div_counter = 0xAC00;
+   mem.DIV = 0XAC;
+}
 
 //cpu registers :
 uint8_t IR;    //instruction register,stores the opcode from rom
-uint8_t IE;    //interrupt enable ,tells cpu which interupts are allowed to trigger
-uint8_t A;     //accumulator : stores arithmeti operations from alu
-uint8_t F = 0b00000000;    //flags 
+uint8_t A;     //accumulator : stores arithmetic operations from alu
+uint8_t F;    //flags 
 uint8_t B;
 uint8_t C;
 uint8_t D;//these 6 are general registers {b,c,d,e,h,l}
 uint8_t E;
 uint8_t H;
 uint8_t L;
-uint16_t PC; //program counter ,holds current adress of memory
+uint16_t PC; //program counter ,holds current adress of memory,skipping past bootrom
 uint16_t SP; //stack pointer : holds  adress of ram
+
+//interupt related variables :
+uint8_t& IE = mem.ram[0x8000];    //interrupt enable ,tells cpu which interupts are allowed to trigger,it lives at the 0XFFFF
+//last adress in ram,bit 0-5 of IE are the 5 interupts that can be allowed in gameboy cpu,bit 6-8 are always zero
+uint8_t& IF = mem.ram [0X7F0F];    //interrupt flag : tells cpu which interupts are currently being requested,
+//bit 0-5 of IF are the 5 interupts that can be requested in gameboy cpu,bit 6-8 are always zero
+
+bool IME ; //master interupt enable flag,interupts can only happen when this is set to true
+bool IME_scheduled;
+bool ime_pending; // for delayed enable interupts
+bool halted ; //set to true when cpu enters halted state aka cpu does nothing untill a interupt is fired
+bool interupt_pending ;
+
+//game_clock related variables :
+const double main_clock = 4194304.0 ;  //gameboy main clock oscilates at 4.194304 million hertz per second
+// so 1 clock cycle is 1/4.19mill seconds long
+const double tick_cycle = 1.0/main_clock; //n seconds per tick
+
+int ticks_remaining = 0;
+// Number of remaining T-cycles the CPU is busy.it is Set to (M-cycles * 4) when an instruction starts.
+// While > 0, the CPU cannot fetch a new opcode,but the global clock (PPU, timers, DMA) keeps running.
+//this emulates the  sense of time that the actual cpu needs time to execute hardware tasks
 
 //now lets make paired registers : 
 
@@ -127,42 +213,72 @@ void split_registers (uint8_t& register1, uint8_t& register2, uint16_t& paired_r
 
 void set_flag (char flag_name , bool data) {
 
-if (flag_name == 'Z') {  //7th bit of F is flag zero
-uint8_t flag_Z = 0x00 | (data << 7); //passing data into desired bit,adding a mask before to make sure no garbage value exists
-F &= ~(1 << 7);  //clearing previous data from specified bit from the flag without clearing whole flag
-F |= flag_Z;     //storing new data
-}
+ if (flag_name == 'Z') {  //7th bit of F is flag zero
+ uint8_t flag_Z = 0x00 | (data << 7); //passing data into desired bit,adding a mask before to make sure no garbage value exists
+ F &= ~(1 << 7);  //clearing previous data from specified bit from the flag without clearing whole flag
+ F |= flag_Z;     //storing new data
+ }
 
-else if (flag_name == 'N') { //6th bit of F is subrtact flag
-uint8_t flag_N = 0x00 | (data << 6);
-F &= ~(1 << 6);
-F |= flag_N;
-}
+ else if (flag_name == 'N') { //6th bit of F is subrtact flag
+ uint8_t flag_N = 0x00 | (data << 6);
+ F &= ~(1 << 6);
+ F |= flag_N;
+ }
 
-else if (flag_name == 'H') { //5th bit of F is halfcarry flag
-uint8_t flag_H = 0x00 | (data << 5);
-F &= ~(1 << 5);
-F |= flag_H;
-}
+ else if (flag_name == 'H') { //5th bit of F is halfcarry flag
+ uint8_t flag_H = 0x00 | (data << 5);
+ F &= ~(1 << 5);
+ F |= flag_H;
+ }
 
-else if (flag_name == 'C') {  //4th bit of F is carry flag
-uint8_t flag_C = 0x00 | (data << 4);
-F &= ~(1 << 4);
-F |= flag_C;
-}
-//we dont care about bit 0-3,ignore them
-F &= 0xF0; //forcing lower nibble to zero
+ else if (flag_name == 'C') {  //4th bit of F is carry flag
+ uint8_t flag_C = 0x00 | (data << 4);
+ F &= ~(1 << 4);
+ F |= flag_C;
+ }
+ //we dont care about bit 0-3,ignore them
+ F &= 0xF0; //forcing lower nibble to zero
 }//func end
 
 bool get_flag (char flag_name) {
-if (flag_name == 'Z') return F & (1 << 7);
-else if (flag_name == 'N') return F & (1 << 6);
-else if (flag_name == 'H') return F & (1 << 5);
-else if (flag_name == 'C') return F & (1 << 4);
-else return 0; //if there are no matches return 0;
-//our i just want want specific value 0 or 1 ,my return gets the correct binary but returns 
-//it as it is so it can be translated to 0 or the actual value of binary(128 for zero flag).we only want 0 and 1 hence return type
-//is bool,anything > 0  is 1.
+ if (flag_name == 'Z') return F & (1 << 7);
+ else if (flag_name == 'N') return F & (1 << 6);
+ else if (flag_name == 'H') return F & (1 << 5);
+ else if (flag_name == 'C') return F & (1 << 4);
+ else return 0; //if there are no matches return 0;
+ //our i just want want specific value 0 or 1 ,my return gets the correct binary but returns 
+ //it as it is so it can be translated to 0 or the actual value of binary(128 for zero flag).we only want 0 and 1 hence return type
+ //is bool,anything > 0  is 1.
+}
+
+void request_interrupt (char interrupt) {
+    
+ if (interrupt == 'V') {  // v blank interupt
+ uint8_t v_blank = 0x00 | (1 << 0); //passing data into desired bit,adding a mask before to make sure no garbage value exists
+ IF |= v_blank;     //storing new data
+ }
+
+ else if (interrupt == 'L') {  // LCD stat interupt
+ uint8_t lcd_strat = 0x00 | (1 << 1); //passing data into desired bit,adding a mask before to make sure no garbage value exists
+ IF |= lcd_strat;     //storing new data
+ }
+
+ else if (interrupt == 'T') {  // TIMER interupt
+ uint8_t timer = 0x00 | (1 << 2); //passing data into desired bit,adding a mask before to make sure no garbage value exists
+ IF |= timer;     //storing new data
+ }
+
+ else if (interrupt == 'S') {  // serial interupt
+ uint8_t serial = 0x00 | (1 << 3); //passing data into desired bit,adding a mask before to make sure no garbage value exists
+ IF |= serial;     //storing new data
+ }
+
+ else if (interrupt == 'J') {  // joypad interupt
+ uint8_t joypad = 0x00 | (1 << 4); //passing data into desired bit,adding a mask before to make sure no garbage value exists
+ IF |= joypad;     //storing new data;
+ }
+ //we dont care about bit 5 - 8,ignore them
+ IF &= 0b00011111; //forcing upper 3 bits to zero
 }
 
 //now we need to emulate arithmetic logic unit aka alu.
@@ -1084,9 +1200,9 @@ uint32_t execute_opcode () {
  uint8_t opcode = fetch_opcode();
 
  if (opcode == 0b01110110) {
-    //halt :  0b01110110 is cpu a instruction called halt so we skip this
-    //will add this later 
-    return 0;//temporary return 
+    //halt :  0b01110110 is cpu a instruction called halt 
+    halted = true;
+    return 1;//it returns 1 machine cycle
  }
 
 //ld opcodes : 8 bit load operations :
@@ -2421,18 +2537,231 @@ uint32_t execute_opcode () {
     return 2; //just fr safety 
  }
 
+ //reti : return from interupt handler -> unconditional return from a function also sets ime to 1 
+ // enabling interupts (1 byte cycle,4 machine cycle)
+ //opcode = 0b11011001
 
+ else if (opcode == 0b11011001) {
+    uint8_t lowbyte = mem.read_memory(SP);
+    SP++;
+    uint8_t highbyte = mem.read_memory(SP);
+    SP++;
+    PC = pair_registers (highbyte,lowbyte);
 
+    IME = true;
+    return 4;
+ }
 
+ //RST n : restart / call function (implied)   (1 byte cycle,4 machine cycle)
+ // unconditional functional call to to the absolute adress defined by opcode
+ // similar to call functions but fast as we jump to 8 absolute specified adresses
+ //opcode = 0b11xxx111
+ else if ((opcode & 0b11000000) == 0b11000000 && (opcode & 0b00000111) == 0b00000111) {
+    uint8_t adress = (opcode >> 3) & 0b00000111;
+
+        SP--; //move to next empty space in stack pointer
+        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        SP--; //stack grows downward
+        mem.write_memory (SP,PC & 0xFF);
+
+    if (adress == 0b000) PC = 0x0000; // RST 00
+    else if (adress == 0b001) PC = 0x0008; // RST 08
+    else if (adress == 0b010) PC = 0x0010; // RST 10
+    else if (adress == 0b011) PC = 0x0018; // RST 18
+    else if (adress == 0b100) PC = 0x0020; // RST 20
+    else if (adress == 0b101) PC = 0x0028; // RST 28
+    else if (adress == 0b110) PC = 0x0030; // RST 30
+    else if (adress == 0b111) PC = 0x0038; // RST 38
+
+    return 4;
+
+ }
+
+ // miscellaneous instructions : 
+
+ // halt : implemented at the start
+
+  // disable interupts : disables interupts by setting ime to 0
+ //opcode = 0b11110011 (1 byte cycle,i machine cycle)
+
+ else if (opcode == 0b11110011) {
+    IME = false;
+    IME_scheduled = false; // also disables EI schedule
+    return 1;
+ }
+
+  //enable interupts : enables interupts by setting ime to 0 after the next machine_cycle
+ //opcode = 0b11111011 (1 byte cycle,i machine cycle)
+
+ else if (opcode == 0b11111011) {
+    IME_scheduled = true;
+    return 1;
+ }
+
+ //nop : no operation : eat fivestar and do nothing,pc will be auto incremented,can be used to add delay of 1 machine cycle
+ // opcode = 0b00000000 (1 byte cycle,1 machine cycle)
+
+ else if (opcode == 0b00000000){
+    //nothing
+    return 1;
+ }
+
+ else if (opcode == 0x10) {
+    //stop
+    return 1;
+ }
+
+std::cout << "unimplemented opcode : " << std::hex << +opcode << std::endl;
  return 0;
 }//function end
+
+uint8_t check_interupt () {
+    if (IF & IE & 0X1F) {
+        interupt_pending = true;
+
+        if (IF & 0b00000001) return 0b00000001;
+        else if (IF & 0b00000010) return 0b00000010;
+        else if (IF & 0b00000100) return 0b00000100;
+        else if (IF & 0b00001000) return 0b00001000;
+        else if (IF & 0b00010000) return 0b00010000;
+    }
+     return 0;
+}
+
+uint16_t get_interupt_jump_adress (uint8_t Interupt) const {
+    // priority wise
+    if (Interupt == 0b00000001) return 0x0040;
+    else if (Interupt == 0b00000010) return 0x0048;
+    else if (Interupt == 0b00000100) return 0x0050;
+    else if (Interupt == 0b00001000) return 0x0058;
+    else if (Interupt == 0b00010000) return 0x0060;
+    else return 0;
+}
+
+void handle_interupt() {
+    uint8_t interupt_present = check_interupt();
+
+    if (IME && interupt_present) {
+
+        SP--; //move to next empty space in stack pointer
+        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        SP--; //stack grows downward
+        mem.write_memory (SP,PC & 0xFF);
+        
+        PC = get_interupt_jump_adress(interupt_present);
+
+        IF &= ~(interupt_present); //clearing specific bit
+    }
+}
+
+int cpu_cycle() {
+
+ if (halted) {
+
+   if (check_interupt ()) halted = false; // if interupt is present wake cpu up
+
+    else return 1; //else keep halted
+
+   }
+
+   handle_interupt(); //if cpu wakes up check if we can service an interupt
+
+    if (!halted && ticks_remaining == 0) {
+
+        int machine_cycle = execute_opcode();
+
+          if (IME_scheduled) {
+            if (ime_pending) {
+                IME = true;
+                IME_scheduled = false;
+                ime_pending = false;
+            }
+            else ime_pending = true;
+          }
+          return machine_cycle*4; //return machine cycle in tick cycle
+    }
+    
+    return 0; //if none of them are true then cpu is stopped,return 0 as timer doesnot tick when cpu is stopped
+}
+
+void timer_tick() {
+
+    uint16_t prev_div_counter = mem.div_counter; //get current div
+    mem.div_counter++; //increment
+    mem.DIV = ((mem.div_counter >> 8) & 0xFF); //update
+
+    bool timer_update = false;
+
+    switch (mem.TAC & (0b11)) {  //last 2 bit of TAC decides which div counter bit we look for tima update
+        case 0b00 :
+           timer_update = (prev_div_counter & (1 << 9)) && (!(mem.div_counter & (1 << 9)));
+           break;
+        
+        case 0b01 :
+           timer_update = (prev_div_counter & (1 << 3)) && (!(mem.div_counter & (1 << 3)));
+           break;
+
+        case 0b10 :
+           timer_update = (prev_div_counter & (1 << 5)) && (!(mem.div_counter & (1 << 5)));
+           break;
+
+        case 0b11 :
+           timer_update = (prev_div_counter & (1 << 7)) && (!(mem.div_counter & (1 << 7)));
+           break;
+    }
+
+    if (timer_update && mem.TAC & (1 << 2)) { // bit 2 of tac aka 3rd bit decides if timer is enabled or not
+        mem.TIMA++; //if timer is enabled and tima can update,increment tima
+
+        if (mem.TIMA == 0xFF) { //if tima overflows
+            mem.tima_overflow = true;
+            mem.tima_overflow = 4;
+        } 
+
+        if (mem.tima_overflow) {
+            if (!mem.tima_reload_delay) {
+                mem.TIMA = mem.TMA;
+                request_interrupt('T');
+            }
+            mem.tima_reload_delay--;
+        }
+
+    }
+
+}
+
+
+
+void execute_tick_cycle() {
+   cpu_cycle();
+   timer_tick();
+}
+
+void game_clock () {
+
+   while (true) {
+
+       if (!ticks_remaining) ticks_remaining = cpu_cycle();
+
+       while (ticks_remaining) {
+
+          execute_tick_cycle();
+          ticks_remaining--;
+
+        }
+
+    }
+
+}
 
 };
 
 void todo_list () {
-//halt should execute before ld even starts
+// add halt, should execute before ld even starts
+// add stop clock insruction later
 }
 
 int main () {
-
+    cpu a;
+    a.game_clock();
 }
