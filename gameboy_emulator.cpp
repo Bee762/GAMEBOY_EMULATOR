@@ -25,7 +25,7 @@ memory () {
 bool map_rom_cartridge() {
 //for more documentation read microsofts memory mapped io in windows
 
-game_file = CreateFileA("cpu_instrs.gb",GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_READONLY,NULL);
+game_file = CreateFileA("02-interrupts.gb",GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_READONLY,NULL);
 //if handle generation fails it returns invalid_handle_value.
 if (game_file == INVALID_HANDLE_VALUE) {
     std::cerr << "HANDLE CREATION FOR GAMEFILE FAILED" << std::endl;
@@ -103,9 +103,44 @@ void write_memory(uint16_t address, uint8_t value) {
        TMA = value;
     }
     if (address == 0xFF07) {
+
+       bool old_enable = timer_enabled();
+       bool old_bit = get_timer_bit();
+       bool old_state = (div_counter >> old_bit) & 1;
+
        TAC = value;
+
+       bool new_enable = timer_enabled();
+       bool new_bit = get_timer_bit();
+       bool new_state = (div_counter >> new_bit) & 1;
+
+       if (old_enable && new_enable) {
+
+        if (old_state == 1 && new_state == 0) {
+            TIMA++;
+        }
+
+       }
+
     }
 
+}
+
+int get_timer_bit () {
+
+    switch (TAC & 0b11)
+        {
+            case 0 : return 9;
+            case 1 : return 3;
+            case 2 : return 5;
+            case 3 : return 7;
+        }
+
+    return 9;
+}
+
+bool timer_enabled () {
+    return (TAC & 0b100);
 }
 
 
@@ -155,6 +190,7 @@ cpu () {
    ime_pending = false;
    halted = false;
    interupt_pending = false;
+   stopped = false;
 
    mem.div_counter = 0xAC00;
    mem.DIV = 0XAC;
@@ -184,11 +220,12 @@ bool IME_scheduled;
 bool ime_pending; // for delayed enable interupts
 bool halted ; //set to true when cpu enters halted state aka cpu does nothing untill a interupt is fired
 bool interupt_pending ;
+bool stopped;
+bool haltbug = false;
 
 //game_clock related variables :
 const double main_clock = 4194304.0 ;  //gameboy main clock oscilates at 4.194304 million hertz per second
 // so 1 clock cycle is 1/4.19mill seconds long
-const double tick_cycle = 1.0/main_clock; //n seconds per tick
 
 int ticks_remaining = 0;
 // Number of remaining T-cycles the CPU is busy.it is Set to (M-cycles * 4) when an instruction starts.
@@ -1184,15 +1221,17 @@ void alu_daa(uint8_t& register1) {
 
 uint8_t fetch_opcode () {
     IR = mem.read_memory(PC); //store opcode in instruction register
-    PC++;//increment programm counter
+    if (haltbug) haltbug = false; //introducing hALTBUG
+    else PC++;
     return IR; //return it
 }
 
 int8_t fetch_rawbyte () { //for getting signed int when needed
     IR = mem.read_memory(PC); //store opcode in instruction register
-    PC++;//increment programm counter
+    PC++;
     return IR; //return it
 }
+
 
 
 uint32_t execute_opcode () {
@@ -2608,11 +2647,12 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0x10) {
     //stop
-    return 1;
+    
+    return 0;
  }
 
 std::cout << "unimplemented opcode : " << std::hex << +opcode << std::endl;
- return 0;
+ return 1;
 }//function end
 
 uint8_t check_interupt () {
@@ -2643,6 +2683,8 @@ void handle_interupt() {
 
     if (IME && interupt_present) {
 
+        halted = false;
+
         SP--; //move to next empty space in stack pointer
         mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
         SP--; //stack grows downward
@@ -2656,19 +2698,27 @@ void handle_interupt() {
 
 int cpu_cycle() {
 
+ handle_interupt(); //if cpu wakes up check if we can service an interupt
+
  if (halted) {
 
-   if (check_interupt ()) halted = false; // if interupt is present wake cpu up
+   if (check_interupt ()) {
+
+    halted = false; // if interupt is present wake cpu up
+
+    if (!IME) {
+    haltbug = true;
+    }
+
+   }
 
     else return 1; //else keep halted
 
    }
 
-   handle_interupt(); //if cpu wakes up check if we can service an interupt
+   if (stopped) return 0;
 
-    if (!halted && ticks_remaining == 0) {
-
-        int machine_cycle = execute_opcode();
+    int machine_cycle = execute_opcode();
 
           if (IME_scheduled) {
             if (ime_pending) {
@@ -2679,10 +2729,9 @@ int cpu_cycle() {
             else ime_pending = true;
           }
           return machine_cycle*4; //return machine cycle in tick cycle
-    }
-    
-    return 0; //if none of them are true then cpu is stopped,return 0 as timer doesnot tick when cpu is stopped
-}
+
+        }
+
 
 void timer_tick() {
 
@@ -2692,48 +2741,51 @@ void timer_tick() {
 
     bool timer_update = false;
 
-    switch (mem.TAC & (0b11)) {  //last 2 bit of TAC decides which div counter bit we look for tima update
-        case 0b00 :
-           timer_update = (prev_div_counter & (1 << 9)) && (!(mem.div_counter & (1 << 9)));
-           break;
-        
-        case 0b01 :
-           timer_update = (prev_div_counter & (1 << 3)) && (!(mem.div_counter & (1 << 3)));
-           break;
+    if (! mem.timer_enabled()) return; //timer disabled
 
-        case 0b10 :
-           timer_update = (prev_div_counter & (1 << 5)) && (!(mem.div_counter & (1 << 5)));
-           break;
+    int bit = mem.get_timer_bit();
 
-        case 0b11 :
-           timer_update = (prev_div_counter & (1 << 7)) && (!(mem.div_counter & (1 << 7)));
-           break;
+    bool old_bit = (prev_div_counter >> bit) & 1;
+    bool new_bit = (mem.div_counter >> bit) & 1;
+
+    if (old_bit == 1 && new_bit == 0) {
+        timer_update = true;
     }
 
-    if (timer_update && mem.TAC & (1 << 2)) { // bit 2 of tac aka 3rd bit decides if timer is enabled or not
-        mem.TIMA++; //if timer is enabled and tima can update,increment tima
+    if (mem.tima_overflow) {
 
-        if (mem.TIMA == 0xFF) { //if tima overflows
-            mem.tima_overflow = true;
-            mem.tima_overflow = 4;
-        } 
-
-        if (mem.tima_overflow) {
-            if (!mem.tima_reload_delay) {
+            if (mem.tima_reload_delay == 1) {
                 mem.TIMA = mem.TMA;
+                mem.tima_overflow = false;
                 request_interrupt('T');
             }
-            mem.tima_reload_delay--;
+
+            else mem.tima_reload_delay--;
+        }
+
+
+    if (timer_update) {
+        
+        if (!mem.tima_overflow) {
+
+             mem.TIMA++; //if timer is enabled and tima can update,increment tima
+
+            if (mem.TIMA == 0x00) { //if tima overflows
+            mem.tima_overflow = true;
+            mem.tima_reload_delay = 4;
+            }
+
         }
 
     }
 
-}
+
+    }
+
 
 
 
 void execute_tick_cycle() {
-   cpu_cycle();
    timer_tick();
 }
 
