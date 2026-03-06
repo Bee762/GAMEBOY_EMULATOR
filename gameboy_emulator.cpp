@@ -77,63 +77,133 @@ uint8_t read_memory (uint16_t adress) const {  //read from cartridge rom
     //rom memory adress in gameboy : 0x0000 to 0x7FFF
 }
 
-
 void write_memory(uint16_t address, uint8_t value) {
-    // Normal RAM write
-    if (address >= 0x8000 && address < 0x8000 + sizeof(ram))
+    //R0M write
+    if ( address < 0x8000 ) {
+        return; //rom address,should not write
+    }
+    //v_ram
+    else if (address >= 0x8000 && address < 0xA000) {
         ram[address - 0x8000] = value;
-
-    // Serial output for Blargg test
+    }
+    //external_ram (cartridge ram)
+    else if (address >= 0xA000 && address < 0xC000) {
+        ram[address - 0x8000] = value;
+    }
+    //work ram bank 0
+    else if (address >= 0xC000 && address < 0xD000) {
+        ram[address - 0x8000] = value;
+        ram[address - 0x8000 + 0x2000] = value;
+    }
+    //workram bank 1
+    else if (address >= 0xD000 && address < 0xE000) {
+        ram[address - 0x8000] = value;
+        if ((address + 0x2000) <= 0xFDFF ) ram [address - 0x8000 + 0x2000] = value;
+    }
+    //echoram
+    else if (address >= 0xE000 && address < 0xFE00) {
+        ram[address - 0x8000] = value;
+        ram[address - 0x8000 - 0x2000] = value;
+    }
+    // oam (sprite attribute table)
+    else if (address >= 0xFE00 && address < 0xFEA0) {
+        ram[address - 0x8000] = value;
+    }
+    //not useable region 
+    else if (address >= 0xFEA0 && address < 0xFF00) {
+        //do nothing
+    }
+    //I/O registers (FF00 - FF7F)
+    else if (address >= 0xFF00 && address < 0xFF80) {
+        //serial ports 
+       /*
+        //SB : holds the output that will be printed to user
+      if (address == 0xFF01) {
+        ram [address - 0x8000] = value;
+       }
+       //sc : decides when data in sb will be printed out
+       else if (address == 0xFF02) {
+        ram[address - 0x8000] = value;
+        if ((value & 0b10000001) == 0b10000001) {
+            char output = static_cast <char> (ram[0xFF01 - 0x8000]);
+            std::cout << output << std::flush;
+            ram[address - 0x8000] &= 0b01111111;//clear the 7th bit;
+            //ram[0xFF0F - 0x8000] |= (1<<3);//request for serial  interrupt
+        }
+       }
+        */
+        
+       // Serial output for Blargg test
     if (address == 0xFF01) {
         char output = static_cast<char>(value);
         std::cout << output;
         std::cout.flush(); // make sure it prints immediately
     }
-    //cpu writting to div resets it
-    if (address == 0xFF04) {
-        DIV = 0;
+        
+      //div
+      else if (address == 0xFF04) {
+        DIV = 0; //cpu writting to div resets it
         div_counter = 0;
-    }
-    //cpu writes to tima during overflow stops tima reload
-    if (address == 0xFF05) {
-        TIMA = value;
+      }
+      //tima
+      else if (address == 0xFF05) {
+        TIMA = value; //cpu writes to tima during overflow stops tima reload
         tima_overflow = false;
-    }
-    if (address == 0xFF06) {
+      }
+      //tma
+      else if (address == 0xFF06) {
        TMA = value;
-    }
-    if (address == 0xFF07) {
+      }
+      //tac
+      else if (address == 0xFF07) {
 
-       bool old_enable = timer_enabled();
-       bool old_bit = get_timer_bit();
-       bool old_state = (div_counter >> old_bit) & 1;
+        bool old_enable = timer_enabled();
+        bool old_bit = get_timer_bit();
+        bool old_state = (div_counter >> old_bit) & 1;
 
-       TAC = value;
+        TAC = (value & 0b00000111);
 
-       bool new_enable = timer_enabled();
-       bool new_bit = get_timer_bit();
-       bool new_state = (div_counter >> new_bit) & 1;
+        bool new_enable = timer_enabled();
+        bool new_bit = get_timer_bit();
+        bool new_state = (div_counter >> new_bit) & 1;
 
-       if (old_enable && new_enable) {
+        if (old_enable && new_enable) {
+ 
+         if (old_state == 1 && new_state == 0) {
+            TIMA++; //if tac frequency changes tima can increment depending on selected bit
+            if (TIMA == 0x00) {
+                tima_overflow = true;
+                tima_reload_delay = 4;
+            }
+         }
 
-        if (old_state == 1 && new_state == 0) {
-            TIMA++;
         }
 
-       }
+      }
 
+      else {
+        ram [address - 0x8000] = value;
+      }
+
+    }
+    //HIGH_ram
+    else if (address >= 0xFF80 && address < 0xFFFF) {
+        ram [address - 0x8000] = value;
+    }
+    //IE register
+    else if (address == 0xFFFF) {
+        ram[address - 0x8000] = value;
     }
 
 }
 
 int get_timer_bit () {
 
-    switch (TAC & 0b11)
-        {
-            case 0 : return 9;
-            case 1 : return 3;
-            case 2 : return 5;
-            case 3 : return 7;
+    switch (TAC & 0b11) {
+        case 0 : return 9;
+        case 1 : return 3;
+        case 2 : return 5;
+        case 3 : return 7;
         }
 
     return 9;
@@ -192,8 +262,11 @@ cpu () {
    interupt_pending = false;
    stopped = false;
 
-   mem.div_counter = 0xAC00;
-   mem.DIV = 0XAC;
+   mem.div_counter = 0x0000;
+   mem.DIV = 0X00;
+   mem.TIMA = 0X00;
+   mem.TMA = 0X00;
+   mem.TAC = 0X00;
 }
 
 //cpu registers :
@@ -210,7 +283,7 @@ uint16_t PC; //program counter ,holds current adress of memory,skipping past boo
 uint16_t SP; //stack pointer : holds  adress of ram
 
 //interupt related variables :
-uint8_t& IE = mem.ram[0x8000];    //interrupt enable ,tells cpu which interupts are allowed to trigger,it lives at the 0XFFFF
+uint8_t& IE = mem.ram[0xFFFF - 0x8000];    //interrupt enable ,tells cpu which interupts are allowed to trigger,it lives at the 0XFFFF
 //last adress in ram,bit 0-5 of IE are the 5 interupts that can be allowed in gameboy cpu,bit 6-8 are always zero
 uint8_t& IF = mem.ram [0X7F0F];    //interrupt flag : tells cpu which interupts are currently being requested,
 //bit 0-5 of IF are the 5 interupts that can be requested in gameboy cpu,bit 6-8 are always zero
@@ -222,12 +295,14 @@ bool halted ; //set to true when cpu enters halted state aka cpu does nothing un
 bool interupt_pending ;
 bool stopped;
 bool haltbug = false;
+bool interrupt_serviced = false;
 
 //game_clock related variables :
 const double main_clock = 4194304.0 ;  //gameboy main clock oscilates at 4.194304 million hertz per second
 // so 1 clock cycle is 1/4.19mill seconds long
 
 int ticks_remaining = 0;
+int ei_delay = 0;
 // Number of remaining T-cycles the CPU is busy.it is Set to (M-cycles * 4) when an instruction starts.
 // While > 0, the CPU cannot fetch a new opcode,but the global clock (PPU, timers, DMA) keeps running.
 //this emulates the  sense of time that the actual cpu needs time to execute hardware tasks
@@ -2683,6 +2758,8 @@ void handle_interupt() {
 
     if (IME && interupt_present) {
 
+       // IME = false;
+
         halted = false;
 
         SP--; //move to next empty space in stack pointer
@@ -2693,6 +2770,7 @@ void handle_interupt() {
         PC = get_interupt_jump_adress(interupt_present);
 
         IF &= ~(interupt_present); //clearing specific bit
+
     }
 }
 
@@ -2720,14 +2798,15 @@ int cpu_cycle() {
 
     int machine_cycle = execute_opcode();
 
-          if (IME_scheduled) {
-            if (ime_pending) {
-                IME = true;
-                IME_scheduled = false;
-                ime_pending = false;
-            }
-            else ime_pending = true;
+    if (IME_scheduled) {
+        ei_delay = 4;
+    }
+
+          if (interrupt_serviced) {
+            machine_cycle += 5;
+            interrupt_serviced = false;
           }
+
           return machine_cycle*4; //return machine cycle in tick cycle
 
         }
@@ -2740,31 +2819,22 @@ void timer_tick() {
     mem.DIV = ((mem.div_counter >> 8) & 0xFF); //update
 
     bool timer_update = false;
+    bool timer_enabled = true;
 
-    if (! mem.timer_enabled()) return; //timer disabled
+    if (! mem.timer_enabled()) timer_enabled = false; //timer disabled
 
-    int bit = mem.get_timer_bit();
+    if (timer_enabled) {
+     int bit = mem.get_timer_bit();
 
-    bool old_bit = (prev_div_counter >> bit) & 1;
-    bool new_bit = (mem.div_counter >> bit) & 1;
+     bool old_bit = (prev_div_counter >> bit) & 1;
+     bool new_bit = (mem.div_counter >> bit) & 1;
 
-    if (old_bit == 1 && new_bit == 0) {
+     if (old_bit == 1 && new_bit == 0) {
         timer_update = true;
-    }
+     }
+    } 
 
-    if (mem.tima_overflow) {
-
-            if (mem.tima_reload_delay == 1) {
-                mem.TIMA = mem.TMA;
-                mem.tima_overflow = false;
-                request_interrupt('T');
-            }
-
-            else mem.tima_reload_delay--;
-        }
-
-
-    if (timer_update) {
+   if (timer_update && timer_enabled) {
         
         if (!mem.tima_overflow) {
 
@@ -2779,6 +2849,16 @@ void timer_tick() {
 
     }
 
+    if (mem.tima_overflow) {
+
+            if (mem.tima_reload_delay == 0) {
+                mem.TIMA = mem.TMA;
+                mem.tima_overflow = false;
+                request_interrupt('T');
+            }
+            else mem.tima_reload_delay--;
+
+        }
 
     }
 
@@ -2797,6 +2877,13 @@ void game_clock () {
 
        while (ticks_remaining) {
 
+        if (IME_scheduled) {
+            if (!ei_delay) {
+                IME = true;
+                IME_scheduled = false;
+            }
+            else ei_delay--;
+        }
           execute_tick_cycle();
           ticks_remaining--;
 
@@ -2805,7 +2892,6 @@ void game_clock () {
     }
 
 }
-
 };
 
 void todo_list () {
