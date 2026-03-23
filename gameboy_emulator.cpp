@@ -4,10 +4,38 @@
 #include <cstdint>
 #include <chrono>
 
+#include <SFML/Graphics.hpp>
+
+void render_frame(uint8_t framebuffer[144][160]);
+
 struct memory {
 memory () {
  mapping_status = map_rom_cartridge();
  if (!mapping_status) std::cerr << "rom mapping failed" << std::endl;
+
+ //initialising variables : 
+
+   div_counter = 0xAB00;
+   DIV = 0XAB;
+   TIMA = 0X00;
+   TMA = 0X00;
+   TAC = 0X00;
+
+   IE = 0b00011111;
+   IF = 0b00000000;
+
+   LCDC = 0X91;
+   STAT = 0X85;
+   SCY = 0;
+   SCX = 0;
+   LY = 0;
+   LYC = 0;
+   BGP = 0XFC;
+   OBP0 = 0XFF;
+   OBP1 = 0XFF;
+   WX = 0;
+   WY = 0;
+
 }
 
 ~memory () {
@@ -20,12 +48,10 @@ memory () {
  //order of destruction will be reverse of order of construction
 }
 
-
-
 bool map_rom_cartridge() {
 //for more documentation read microsofts memory mapped io in windows
 
-game_file = CreateFileA("02-interrupts.gb",GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_READONLY,NULL);
+game_file = CreateFileA("01-read_timing.gb",GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_READONLY,NULL);
 //if handle generation fails it returns invalid_handle_value.
 if (game_file == INVALID_HANDLE_VALUE) {
     std::cerr << "HANDLE CREATION FOR GAMEFILE FAILED" << std::endl;
@@ -71,8 +97,23 @@ return true;
 }
 
 uint8_t read_memory (uint16_t adress) const {  //read from cartridge rom
+
     if (adress < 0x8000)return rom_adress [adress];   //pointer arithmetic : rom_adress [i] = i elements after rom adress.
-    else return ram [adress - 0x8000]; // ram indexing in my memory starts from 0 so convert.
+
+     //v_ram
+    else if (adress >= 0x8000 && adress < 0xA000) {
+        return ram [adress - 0x8000];
+    }
+    // oam (sprite attribute table)
+    else if (adress >= 0xFE00 && adress < 0xFEA0) {
+        return ram [adress - 0x8000];
+    }
+
+    else if (adress == 0xFF0F) {
+        return IF | 0XE0;
+    }
+
+    else  return ram [adress - 0x8000]; // ram indexing in my memory starts from 0 so convert.
     //if memory adress location is in rom return rom adress else return ram adress
     //rom memory adress in gameboy : 0x0000 to 0x7FFF
 }
@@ -84,7 +125,7 @@ void write_memory(uint16_t address, uint8_t value) {
     }
     //v_ram
     else if (address >= 0x8000 && address < 0xA000) {
-        ram[address - 0x8000] = value;
+         ram[address - 0x8000] = value;
     }
     //external_ram (cartridge ram)
     else if (address >= 0xA000 && address < 0xC000) {
@@ -142,9 +183,29 @@ void write_memory(uint16_t address, uint8_t value) {
         
       //div
       else if (address == 0xFF04) {
-        DIV = 0; //cpu writting to div resets it
+
+        uint16_t prev_div_counter  = div_counter;
+
+        DIV = 0; //cpu writting to div resets it,this can also cause tima falling edge
         div_counter = 0;
+
+        bool timer_enable = timer_enabled();
+
+        if (timer_enable) {
+
+        int bit = get_timer_bit();
+        bool old_bit = (prev_div_counter >> bit) & 1;
+
+        if (old_bit == 1 ) {
+            TIMA++;
+            if (TIMA == 0X00) {
+                tima_overflow = true;
+                tima_reload_delay = 4;
+            }
+         }
       }
+
+    }
       //tima
       else if (address == 0xFF05) {
         TIMA = value; //cpu writes to tima during overflow stops tima reload
@@ -161,7 +222,7 @@ void write_memory(uint16_t address, uint8_t value) {
         bool old_bit = get_timer_bit();
         bool old_state = (div_counter >> old_bit) & 1;
 
-        TAC = (value & 0b00000111);
+        TAC = (value & 0b00000111); //tac frequency change can also cause tima increment
 
         bool new_enable = timer_enabled();
         bool new_bit = get_timer_bit();
@@ -169,7 +230,8 @@ void write_memory(uint16_t address, uint8_t value) {
 
         if (old_enable && new_enable) {
  
-         if (old_state == 1 && new_state == 0) {
+         if (old_state == 1 && new_state == 0) { //here a edge case might be plausible,look later
+
             TIMA++; //if tac frequency changes tima can increment depending on selected bit
             if (TIMA == 0x00) {
                 tima_overflow = true;
@@ -179,6 +241,20 @@ void write_memory(uint16_t address, uint8_t value) {
 
         }
 
+      }
+
+      else if (address == 0xFF41) {
+        //stat register
+        //ppu controls last 3 bits ,cpu cannot over right them
+        uint8_t old_stat = ram [address - 0x8000];
+        uint8_t stat_value = ((old_stat & 0b00000111) | (value & 0b11111000));
+        ram [address - 0x8000] = (stat_value | 0b10000000);
+        //in hardware bit 7 of state register is unused and always 1;
+      }
+      else if (address == 0xFF44) {
+        //ly register
+        //writes willbe ignored
+        return;
       }
 
       else {
@@ -220,6 +296,8 @@ uint8_t* rom_adress = nullptr; // the starting adress of mapped rom.
 
 uint8_t ram [32768];   //gameboy memory.
 
+//timer registers : 
+
 uint8_t& DIV  =  ram [0xFF04 - 0x8000];
 uint8_t& TIMA = ram [0xFF05 - 0x8000];
 uint8_t& TMA  =  ram [0xFF06 - 0x8000];
@@ -229,17 +307,46 @@ uint16_t div_counter = 0x0000;
 uint8_t tima_reload_delay = 0;
 bool tima_overflow = false;
 
+//io registers :
+
+ uint8_t& LCDC = ram[0XFF40 - 0X8000];
+ uint8_t& STAT = ram[0XFF41 - 0x8000];
+ uint8_t& SCY = ram[0XFF42 - 0X8000];
+ uint8_t& SCX = ram[0xFF43 - 0X8000];
+ uint8_t& LY = ram[0XFF44 - 0X8000];
+ uint8_t& LYC = ram[0XFF45 - 0X8000];
+ uint8_t& DMA = ram[0XFF46 - 0X8000];
+ uint8_t& BGP = ram[0XFF47 - 0X8000];
+ uint8_t& OBP0 = ram[0XFF48 - 0X8000];
+ uint8_t& OBP1 = ram[0XFF49 - 0X8000];
+ uint8_t& WY = ram[0XFF4A - 0X8000];
+ uint8_t& WX = ram[0XFF4B - 0X8000];
+
+//interupt related variables :
+uint8_t& IE = ram[0xFFFF - 0x8000];    //interrupt enable ,tells cpu which interupts are allowed to trigger,it lives at the 0XFFFF
+//last adress in ram,bit 0-5 of IE are the 5 interupts that can be allowed in gameboy cpu,bit 6-8 are always zero
+uint8_t& IF = ram [0XFF0F - 0X8000];    //interrupt flag : tells cpu which interupts are currently being requested,
+//bit 0-5 of IF are the 5 interupts that can be requested in gameboy cpu,bit 6-8 are always zero
+
 bool mapping_status = false;
+bool ppu_pixel_transfer = false; //during ppu pixel transfer writes to oam and vram are disabled and read returns 0xff
+bool oam_search = false;
+
 
 };
 
 struct cpu {
 //gameboy uses Sharp LR35902 cpu,it has 8 bit architecture
 
-    memory mem;
+  memory* mem;//pointer to a memory obj so i can use memory from cpu
 
-cpu () { 
- //constructor initialises the variables after bootram
+cpu (memory* memory) {   // taking a memory pointer in constructer parameter
+
+    mem = memory; //and now mem is pointing to memory ,this is done to sync all other components later like ppu and stuff
+    //to use same copy of memory and run in sync
+
+ //constructor initialises the variables after bootram fr pokemon
+
    PC = 0X0100;
    SP = 0XFFFE;
 
@@ -252,9 +359,6 @@ cpu () {
    H = 0X01;
    L = 0X4D;
 
-   IF = 0b00000000;
-   IE = 0b00011111;
-
    IME = false;
    IME_scheduled = false;
    ime_pending = false;
@@ -262,11 +366,6 @@ cpu () {
    interupt_pending = false;
    stopped = false;
 
-   mem.div_counter = 0x0000;
-   mem.DIV = 0X00;
-   mem.TIMA = 0X00;
-   mem.TMA = 0X00;
-   mem.TAC = 0X00;
 }
 
 //cpu registers :
@@ -282,12 +381,6 @@ uint8_t L;
 uint16_t PC; //program counter ,holds current adress of memory,skipping past bootrom
 uint16_t SP; //stack pointer : holds  adress of ram
 
-//interupt related variables :
-uint8_t& IE = mem.ram[0xFFFF - 0x8000];    //interrupt enable ,tells cpu which interupts are allowed to trigger,it lives at the 0XFFFF
-//last adress in ram,bit 0-5 of IE are the 5 interupts that can be allowed in gameboy cpu,bit 6-8 are always zero
-uint8_t& IF = mem.ram [0X7F0F];    //interrupt flag : tells cpu which interupts are currently being requested,
-//bit 0-5 of IF are the 5 interupts that can be requested in gameboy cpu,bit 6-8 are always zero
-
 bool IME ; //master interupt enable flag,interupts can only happen when this is set to true
 bool IME_scheduled;
 bool ime_pending; // for delayed enable interupts
@@ -297,15 +390,7 @@ bool stopped;
 bool haltbug = false;
 bool interrupt_serviced = false;
 
-//game_clock related variables :
-const double main_clock = 4194304.0 ;  //gameboy main clock oscilates at 4.194304 million hertz per second
-// so 1 clock cycle is 1/4.19mill seconds long
-
-int ticks_remaining = 0;
 int ei_delay = 0;
-// Number of remaining T-cycles the CPU is busy.it is Set to (M-cycles * 4) when an instruction starts.
-// While > 0, the CPU cannot fetch a new opcode,but the global clock (PPU, timers, DMA) keeps running.
-//this emulates the  sense of time that the actual cpu needs time to execute hardware tasks
 
 //now lets make paired registers : 
 
@@ -367,30 +452,30 @@ void request_interrupt (char interrupt) {
     
  if (interrupt == 'V') {  // v blank interupt
  uint8_t v_blank = 0x00 | (1 << 0); //passing data into desired bit,adding a mask before to make sure no garbage value exists
- IF |= v_blank;     //storing new data
+ mem->IF |= v_blank;     //storing new data
  }
 
  else if (interrupt == 'L') {  // LCD stat interupt
  uint8_t lcd_strat = 0x00 | (1 << 1); //passing data into desired bit,adding a mask before to make sure no garbage value exists
- IF |= lcd_strat;     //storing new data
+ mem->IF |= lcd_strat;     //storing new data
  }
 
  else if (interrupt == 'T') {  // TIMER interupt
  uint8_t timer = 0x00 | (1 << 2); //passing data into desired bit,adding a mask before to make sure no garbage value exists
- IF |= timer;     //storing new data
+ mem->IF |= timer;     //storing new data
  }
 
  else if (interrupt == 'S') {  // serial interupt
  uint8_t serial = 0x00 | (1 << 3); //passing data into desired bit,adding a mask before to make sure no garbage value exists
- IF |= serial;     //storing new data
+ mem->IF |= serial;     //storing new data
  }
 
  else if (interrupt == 'J') {  // joypad interupt
  uint8_t joypad = 0x00 | (1 << 4); //passing data into desired bit,adding a mask before to make sure no garbage value exists
- IF |= joypad;     //storing new data;
+ mem->IF |= joypad;     //storing new data;
  }
  //we dont care about bit 5 - 8,ignore them
- IF &= 0b00011111; //forcing upper 3 bits to zero
+ mem->IF &= 0b00011111; //forcing upper 3 bits to zero
 }
 
 //now we need to emulate arithmetic logic unit aka alu.
@@ -425,7 +510,7 @@ void alu_add_memory_adress (uint8_t& register1 , uint8_t& register2 ,uint8_t& re
 
     uint16_t paired_register = pair_registers (register2,register3);
 
-    uint8_t value = mem.read_memory(paired_register);
+    uint8_t value = mem->read_memory(paired_register);
 
     uint16_t result = register1 + value;
 
@@ -468,7 +553,7 @@ void alu_add_memory_adress_carry (uint8_t& register1 , uint8_t& register2 ,uint8
 
     uint16_t paired_register = pair_registers (register2,register3);
 
-    uint8_t value = mem.read_memory(paired_register);
+    uint8_t value = mem->read_memory(paired_register);
 
     bool carry_flag = get_flag('C');
 
@@ -558,7 +643,7 @@ void alu_sub_memory_adress (uint8_t& register1 , uint8_t& register2 ,uint8_t& re
 
     uint16_t paired_register = pair_registers (register2,register3);
 
-    uint8_t value = mem.read_memory(paired_register);
+    uint8_t value = mem->read_memory(paired_register);
 
     uint16_t result = register1 - value;
 
@@ -603,7 +688,7 @@ void alu_sub_memory_adress_carry (uint8_t& register1 , uint8_t& register2 ,uint8
 
     uint16_t paired_register = pair_registers (register2,register3);
 
-    uint8_t value = mem.read_memory(paired_register);
+    uint8_t value = mem->read_memory(paired_register);
 
     bool carry_flag = get_flag('C');
 
@@ -693,14 +778,14 @@ void alu_inc_memory (uint8_t& register1 , uint8_t& register2) {
 
     uint16_t paired_register = pair_registers (register1,register2);
 
-    uint8_t value = mem.read_memory(paired_register);
+    uint8_t value = mem->read_memory(paired_register);
 
     uint8_t old_value = value;//preserving old value for half carry check
 
 
     value++;
 
-    mem.write_memory(paired_register,value);
+    mem->write_memory(paired_register,value);
 
     if (value == 0) set_flag ('Z', 1);
     else set_flag ('Z', 0);
@@ -748,13 +833,13 @@ void alu_dec_memory (uint8_t& register1 , uint8_t& register2) {
 
     uint16_t paired_register = pair_registers (register1,register2);
 
-    uint8_t value = mem.read_memory(paired_register);
+    uint8_t value = mem->read_memory(paired_register);
 
     uint8_t old_value = value;//preserving old value for half carry check
 
     value--;
 
-    mem.write_memory(paired_register,value);
+    mem->write_memory(paired_register,value);
 
     if (value == 0) set_flag ('Z', 1);
     else set_flag ('Z', 0);
@@ -800,7 +885,7 @@ void alu_compare_reg_memory_adress (uint8_t& register1, uint8_t& register2, uint
 
     uint16_t paired_register = pair_registers (register2,register3);
 
-    uint8_t value = mem.read_memory(paired_register);
+    uint8_t value = mem->read_memory(paired_register);
     uint16_t result = register1 - value;
 
      if (static_cast<uint8_t>(result) == 0) set_flag ('Z', 1);
@@ -840,7 +925,7 @@ void alu_and(uint8_t& register1 , uint8_t value) {
 void alu_and_memory_adress(uint8_t& register1 , uint8_t& register2, uint8_t& register3) {
 
     uint16_t adress = pair_registers(register2,register3);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     register1 = register1 & value;
 
@@ -870,7 +955,7 @@ void alu_or(uint8_t& register1 , uint8_t value) {
 void alu_or_memory_adress(uint8_t& register1 , uint8_t& register2, uint8_t& register3) {
 
     uint16_t adress = pair_registers(register2,register3);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     register1 = register1 | value;
 
@@ -900,7 +985,7 @@ void alu_xor(uint8_t& register1 , uint8_t value) {
 void alu_xor_memory_adress(uint8_t& register1 , uint8_t& register2, uint8_t& register3) {
 
     uint16_t adress = pair_registers(register2,register3);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     register1 = register1 ^ value;
 
@@ -938,13 +1023,13 @@ void alu_rotate_left_circular (uint8_t& register1) {
 
 void alu_rotate_left_circular_memory_adress(uint8_t& register1, uint8_t& register2) {
     uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     bool fallen_bit = (value >> 7);
 
     value = (value << 1) | fallen_bit;
 
-    mem.write_memory(adress,value);
+    mem->write_memory(adress,value);
 
     if (value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
@@ -978,13 +1063,13 @@ void alu_rotate_right_circular (uint8_t& register1) {
 
 void alu_rotate_right_circular_memory_adress(uint8_t& register1, uint8_t& register2) {
     uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     bool fallen_bit = (value & 0x01);
 
     value = (value >> 1) | (fallen_bit << 7);
 
-    mem.write_memory(adress,value);
+    mem->write_memory(adress,value);
 
     if (value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
@@ -1017,13 +1102,13 @@ void alu_rotate_left_carry_memory_adress(uint8_t& register1,uint8_t& register2) 
     bool old_carry = get_flag('C');
 
     uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     bool fallen_bit = (value >> 7);
 
     value = (value << 1) | old_carry;
 
-    mem.write_memory(adress,value);
+    mem->write_memory(adress,value);
 
     if (value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
@@ -1057,13 +1142,13 @@ void alu_rotate_right_carry_memory_adress(uint8_t& register1,uint8_t& register2)
     bool old_carry = get_flag('C');
 
     uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     bool fallen_bit = (value & 0x01);
 
     value = (value >> 1) | (old_carry << 7);
 
-    mem.write_memory(adress,value);
+    mem->write_memory(adress,value);
 
     if (value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
@@ -1094,11 +1179,11 @@ void alu_shift_left (uint8_t& register1) {
 
 void alu_shift_left_memory_adress (uint8_t& register1,uint8_t& register2) {
     uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     bool fallen_bit = (value >> 7);
     value <<= 1;
-    mem.write_memory(adress,value);
+    mem->write_memory(adress,value);
 
     if (value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
@@ -1128,13 +1213,13 @@ void alu_shift_right (uint8_t& register1) {
 
 void alu_shift_right_memory_adress (uint8_t& register1,uint8_t& register2) {
     uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     bool fallen_bit = (value & 0x01);
     bool preserved_bit = (value >> 7);
     value = (value >> 1) | (static_cast<uint8_t>(preserved_bit) << 7);
 
-    mem.write_memory(adress,value);
+    mem->write_memory(adress,value);
 
     if (value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
@@ -1164,11 +1249,11 @@ void alu_shift_right_logical (uint8_t& register1) {
 
 void alu_shift_right_logical_memory_adress (uint8_t& register1,uint8_t& register2) {
     uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     bool fallen_bit = (value & 0x01);
     value >>= 1;
-    mem.write_memory(adress,value);
+    mem->write_memory(adress,value);
 
     if (value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
@@ -1197,11 +1282,11 @@ void alu_swap (uint8_t& register1) {
 void alu_swap_memory (uint8_t& register1 ,uint8_t& register2) {
     //swap upper nibble with lower nibble
     uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem.read_memory(adress);
+    uint8_t value = mem->read_memory(adress);
 
     value = (value << 4) | (value >> 4);
 
-    mem.write_memory(adress,value);
+    mem->write_memory(adress,value);
 
     if (value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
@@ -1295,14 +1380,16 @@ void alu_daa(uint8_t& register1) {
 //now lets write opcode fetching and execution.
 
 uint8_t fetch_opcode () {
-    IR = mem.read_memory(PC); //store opcode in instruction register
-    if (haltbug) haltbug = false; //introducing hALTBUG
+    IR = mem->read_memory(PC); //store opcode in instruction register
+    if (haltbug) {
+    haltbug = false; //introducing hALTBUG
+    }
     else PC++;
     return IR; //return it
 }
 
 int8_t fetch_rawbyte () { //for getting signed int when needed
-    IR = mem.read_memory(PC); //store opcode in instruction register
+    IR = mem->read_memory(PC); //store opcode in instruction register
     PC++;
     return IR; //return it
 }
@@ -1315,7 +1402,11 @@ uint32_t execute_opcode () {
 
  if (opcode == 0b01110110) {
     //halt :  0b01110110 is cpu a instruction called halt 
-    halted = true;
+    if (!IME && (mem->IF & mem->IE & 0x1F)) {
+     haltbug = true;
+    } else {
+     halted = true;
+    }
     return 1;//it returns 1 machine cycle
  }
 
@@ -1339,7 +1430,7 @@ uint32_t execute_opcode () {
      else if (last_register == 0b011) value = E;
      else if (last_register == 0b100) value = H;
      else if (last_register == 0b101) value = L;
-     else if (last_register == 0b110) value = mem.read_memory(pair_registers(H,L)); //value at memory adress pointed by (HL)
+     else if (last_register == 0b110) value = mem->read_memory(pair_registers(H,L)); //value at memory adress pointed by (HL)
      else if (last_register == 0b111) value = A;
 
      //now lets assign value in designated register (ld r)
@@ -1355,7 +1446,7 @@ uint32_t execute_opcode () {
      else if (first_register == 0b011) E = value;
      else if (first_register == 0b100) H = value;
      else if (first_register == 0b101) L = value;
-     else if (first_register == 0b110) mem.write_memory(pair_registers(H,L),value);
+     else if (first_register == 0b110) mem->write_memory(pair_registers(H,L),value);
       //0b01110110 is already skipped as halt
       //also it translates to ld (hl) (hl) means write value stored by adress hl to adress hl,it does nothing anyways
       //thats why cpu uses this specific binary as halt
@@ -1386,7 +1477,7 @@ uint32_t execute_opcode () {
      else if (reg == 0b011) E = n;
      else if (reg == 0b100) H = n;
      else if (reg == 0b101) L = n;
-     else if (reg == 0b110) mem.write_memory(pair_registers(H,L),n);
+     else if (reg == 0b110) mem->write_memory(pair_registers(H,L),n);
      else if (reg == 0b111) A = n;
 
      //return statements
@@ -1401,7 +1492,7 @@ uint32_t execute_opcode () {
  //opcode : 0b00001010
 
  else if (opcode == 0b00001010) {
-    A = mem.read_memory(pair_registers(B,C));
+    A = mem->read_memory(pair_registers(B,C));
     return 2;
  }
 
@@ -1409,7 +1500,7 @@ uint32_t execute_opcode () {
  //opcode : 0b00011010
 
  else if (opcode == 0b00011010) {
-    A = mem.read_memory(pair_registers(D,E));
+    A = mem->read_memory(pair_registers(D,E));
     return 2;
  }
 
@@ -1417,7 +1508,7 @@ uint32_t execute_opcode () {
  //opcode : 0b00000010
 
  else if (opcode == 0b00000010) {
-    mem.write_memory(pair_registers(B,C),A);
+    mem->write_memory(pair_registers(B,C),A);
     return 2;
  }
 
@@ -1425,7 +1516,7 @@ uint32_t execute_opcode () {
  //opcode : 0b00010010
 
  else if (opcode == 0b00010010) {
-    mem.write_memory(pair_registers(D,E),A);
+    mem->write_memory(pair_registers(D,E),A);
     return 2;
  }
 
@@ -1437,7 +1528,7 @@ uint32_t execute_opcode () {
     uint8_t n1 = fetch_opcode();//low byte (first n)
     uint8_t n2 = fetch_opcode();//high byte (second n)
     //n1 and n2 are immediate value (nn) = (n2 n1)
-    A = mem.read_memory(pair_registers(n2,n1)); //n1 and n2 are not registers but they will use same concept
+    A = mem->read_memory(pair_registers(n2,n1)); //n1 and n2 are not registers but they will use same concept
     //but in pair register (a,b) a is used as high byte as we will use n2 as highbyte so n2 first
     return 4;
  }
@@ -1448,7 +1539,7 @@ uint32_t execute_opcode () {
  else if (opcode == 0b11101010) {
     uint8_t n1 = fetch_opcode();
     uint8_t n2 = fetch_opcode();
-    mem.write_memory(pair_registers(n2,n1),A);
+    mem->write_memory(pair_registers(n2,n1),A);
     return 4;
  }
 
@@ -1457,7 +1548,7 @@ uint32_t execute_opcode () {
  //opcode : 0b11110010               (2 machine cycle 1 byte cycle)
 
  else if (opcode == 0b11110010) {
-    A = mem.read_memory(0xFF00 + C); //just making sure memory stays in range of 0xFF00 - 0xFFFF
+    A = mem->read_memory(0xFF00 + C); //just making sure memory stays in range of 0xFF00 - 0xFFFF
     //as c is 8 bit int the result highbyte stays 0xFF
     return 2;
  }
@@ -1466,7 +1557,7 @@ uint32_t execute_opcode () {
  //opcode : 0b11100010
 
  else if (opcode == 0b11100010) {
-    mem.write_memory(C+0xFF00,A);
+    mem->write_memory(C+0xFF00,A);
     return 2;
  }
 
@@ -1475,7 +1566,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b11110000) {
     uint8_t n = fetch_opcode();
-    A = mem.read_memory(0xFF00+n);
+    A = mem->read_memory(0xFF00+n);
     return 3;
  }
 
@@ -1484,7 +1575,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b11100000) {
     uint8_t n = fetch_opcode();
-    mem.write_memory(0xFF00+n,A);
+    mem->write_memory(0xFF00+n,A);
     return 3;
  }
 
@@ -1493,7 +1584,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b00111010) {
     uint16_t hl = pair_registers(H,L);
-    A = mem.read_memory(hl);
+    A = mem->read_memory(hl);
     hl--;
     split_registers(H,L,hl);
     return 2;
@@ -1504,7 +1595,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b00110010) {
     uint16_t hl = pair_registers(H,L);
-    mem.write_memory(hl,A);
+    mem->write_memory(hl,A);
     hl--;
     split_registers(H,L,hl);
     return 2;
@@ -1515,7 +1606,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b00101010) {
     uint16_t hl = pair_registers(H,L);
-    A = mem.read_memory(hl);
+    A = mem->read_memory(hl);
     hl++;
     split_registers(H,L,hl);
     return 2;
@@ -1526,7 +1617,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b00100010) {
     uint16_t hl = pair_registers(H,L);
-    mem.write_memory(hl,A);
+    mem->write_memory(hl,A);
     hl++;
     split_registers(H,L,hl);
     return 2;
@@ -1560,9 +1651,9 @@ uint32_t execute_opcode () {
     uint8_t highbyte = fetch_opcode();
     //we will split sp in two 8 bit int because memory cant store 16 bit data
     uint16_t adress = pair_registers(highbyte,lowbyte);
-    mem.write_memory(adress,SP & 0x00FF);  //low byte in memory ,
+    mem->write_memory(adress,SP & 0x00FF);  //low byte in memory ,
     adress++;
-    mem.write_memory(adress,((SP >> 8) & 0x00FF));  //high byte in memory ,
+    mem->write_memory(adress,((SP >> 8) & 0x00FF));  //high byte in memory ,
 
     return 5;
  }
@@ -1584,27 +1675,27 @@ uint32_t execute_opcode () {
     uint8_t rr = (opcode >> 4) & 0b00000011;
 
     if (rr == 0b00) { // BC register
-    mem.write_memory(SP,B); //memory can store 1 byte at a adress as its 8 bit
+    mem->write_memory(SP,B); //memory can store 1 byte at a adress as its 8 bit
     SP--; // so we decrement sp again to go to next adjacent slot
-    mem.write_memory(SP,C); //and store 2nd register value there instead of pairing and storing
+    mem->write_memory(SP,C); //and store 2nd register value there instead of pairing and storing
     }
 
     else if (rr == 0b01) { //DE register
-    mem.write_memory(SP,D); 
+    mem->write_memory(SP,D); 
     SP--; 
-    mem.write_memory(SP,E); 
+    mem->write_memory(SP,E); 
     }
 
     else if (rr == 0b10) { //HL register
-    mem.write_memory(SP,H); 
+    mem->write_memory(SP,H); 
     SP--; 
-    mem.write_memory(SP,L); 
+    mem->write_memory(SP,L); 
     }
 
     else if (rr == 0b11) { //AF register
-    mem.write_memory(SP,A); 
+    mem->write_memory(SP,A); 
     SP--; 
-    mem.write_memory(SP,F & 0xF0);  // we only need first 4 bit of flag,lower bit is masked to zero
+    mem->write_memory(SP,F & 0xF0);  // we only need first 4 bit of flag,lower bit is masked to zero
     }
 
     return 4;
@@ -1614,9 +1705,9 @@ uint32_t execute_opcode () {
  //opcode : 0b11xx0001
 
  else if ((opcode & 0b11000000) == 0b11000000 && (opcode & 0b00001111) == 0b00000001) {
-    uint8_t lowbyte = mem.read_memory(SP);
+    uint8_t lowbyte = mem->read_memory(SP);
     SP++;
-    uint8_t highbyte = mem.read_memory(SP);
+    uint8_t highbyte = mem->read_memory(SP);
     SP++; //sp always points at next data to pop,so pop can be called again
 
     uint16_t stack_data = pair_registers(highbyte,lowbyte);//pairing high and lowbyte
@@ -2256,6 +2347,7 @@ uint32_t execute_opcode () {
     //n flag is set to 0 and h is set to 1 (2 byte cycle,2 machine cycle)
     //opcode = 0xcb >> 0b01xxxxxx 
 
+    
     else if ((cb_opcode & 0b11000000) == 0b01000000) {
         uint8_t bit = (cb_opcode >> 3) & 0b00000111;
         uint8_t r = cb_opcode & 0b00000111;
@@ -2263,8 +2355,7 @@ uint32_t execute_opcode () {
         uint8_t* reg_pointer = nullptr;
         uint8_t value = 0;
 
-        if (r == 0b110) value = mem.read_memory(pair_registers(H,L));  //stores value of paired hl for future
-
+        if (r == 0b110)  value = mem->read_memory(pair_registers(H,L));  //stores value of paired hl for future
       if (r == 0b000) reg_pointer = &B;
       else if (r == 0b001) reg_pointer = &C;
       else if (r == 0b010) reg_pointer = &D;
@@ -2284,9 +2375,11 @@ uint32_t execute_opcode () {
       else if (bit == 0b111) alu_test_bit(*reg_pointer,0b10000000);
 
       //return 
-       if (r == 0b110) return 3;
+       if (r == 0b110)  return 3;
        else return 2;
     }
+    
+       
 
     //res b,r : reset bit register 
     //resets the bit b  of a register r , (2 byte cycle,2 machine cycle)
@@ -2299,7 +2392,7 @@ uint32_t execute_opcode () {
         uint8_t* reg_pointer = nullptr; // reg pointer
 
          uint8_t value = 0;
-         if (r==0b110) value = mem.read_memory(pair_registers(H,L)); //read from memory and store value for memory operation
+         if (r==0b110) value = mem->read_memory(pair_registers(H,L)); //read from memory and store value for memory operation
 
       if (r == 0b000) reg_pointer = &B;
       else if (r == 0b001) reg_pointer = &C;
@@ -2321,7 +2414,7 @@ uint32_t execute_opcode () {
 
       //return 
        if (r == 0b110) {
-        mem.write_memory(pair_registers(H,L),value); //for memory operations write back
+        mem->write_memory(pair_registers(H,L),value); //for memory operations write back
         return 4;
        }
        else return 2;
@@ -2338,7 +2431,7 @@ uint32_t execute_opcode () {
         uint8_t* reg_pointer = nullptr; // reg pointer
      
          uint8_t value = 0;
-         if (r==0b110) value = mem.read_memory(pair_registers(H,L)); //read from memory and store value for memory operation
+         if (r==0b110) value = mem->read_memory(pair_registers(H,L)); //read from memory and store value for memory operation
 
 
       if (r == 0b000) reg_pointer = &B;
@@ -2361,7 +2454,7 @@ uint32_t execute_opcode () {
 
       //return 
        if (r == 0b110) {
-        mem.write_memory(pair_registers(H,L),value); //for memory operations write back
+        mem->write_memory(pair_registers(H,L),value); //for memory operations write back
         return 4;
        }
        else return 2;
@@ -2505,9 +2598,9 @@ uint32_t execute_opcode () {
     uint8_t highbyte = fetch_opcode();
 
     SP--; //move to next empty space in stack pointer
-    mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+    mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
     SP--; //stack grows downward
-    mem.write_memory (SP,PC & 0xFF);
+    mem->write_memory (SP,PC & 0xFF);
 
     PC = pair_registers(highbyte,lowbyte);
 
@@ -2529,9 +2622,9 @@ uint32_t execute_opcode () {
     if (cc == 0b00) { //NZ = not zero
          if (!z_flag) {
         SP--; //move to next empty space in stack pointer
-        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
         SP--; //stack grows downward
-        mem.write_memory (SP,PC & 0xFF);
+        mem->write_memory (SP,PC & 0xFF);
         PC = pair_registers(highbyte,lowbyte);
         return 6;
         }
@@ -2541,9 +2634,9 @@ uint32_t execute_opcode () {
     else if (cc == 0b01) { //Z = zero
         if (z_flag) {
         SP--; //move to next empty space in stack pointer
-        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
         SP--; //stack grows downward
-        mem.write_memory (SP,PC & 0xFF);
+        mem->write_memory (SP,PC & 0xFF);
         PC = pair_registers(highbyte,lowbyte);
         return 6;
         }
@@ -2554,9 +2647,9 @@ uint32_t execute_opcode () {
     else if (cc == 0b10) { //NC = not carry
         if (!C_flag) {
         SP--; //move to next empty space in stack pointer
-        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
         SP--; //stack grows downward
-        mem.write_memory (SP,PC & 0xFF);
+        mem->write_memory (SP,PC & 0xFF);
         PC = pair_registers(highbyte,lowbyte);
         return 6;
         }
@@ -2567,9 +2660,9 @@ uint32_t execute_opcode () {
     else if (cc == 0b11) { //C = carry
         if (C_flag) {
         SP--; //move to next empty space in stack pointer
-        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
         SP--; //stack grows downward
-        mem.write_memory (SP,PC & 0xFF);
+        mem->write_memory (SP,PC & 0xFF);
         PC = pair_registers(highbyte,lowbyte);
         return 6;
         }
@@ -2582,9 +2675,9 @@ uint32_t execute_opcode () {
  //opcode : 0b11001001
 
  else if (opcode == 0b11001001) {
-    uint8_t lowbyte = mem.read_memory(SP);
+    uint8_t lowbyte = mem->read_memory(SP);
     SP++;
-    uint8_t highbyte = mem.read_memory(SP);
+    uint8_t highbyte = mem->read_memory(SP);
     SP++;
     PC = pair_registers (highbyte,lowbyte);
     return 4;
@@ -2601,9 +2694,9 @@ uint32_t execute_opcode () {
 
     if (cc == 0b00) { //NZ = not zero
          if (!z_flag) {
-         uint8_t lowbyte = mem.read_memory(SP);
+         uint8_t lowbyte = mem->read_memory(SP);
          SP++;
-         uint8_t highbyte = mem.read_memory(SP);
+         uint8_t highbyte = mem->read_memory(SP);
          SP++;
          PC = pair_registers (highbyte,lowbyte);
          return 5;
@@ -2613,9 +2706,9 @@ uint32_t execute_opcode () {
 
     else if (cc == 0b01) { //Z = zero
         if (z_flag) {
-         uint8_t lowbyte = mem.read_memory(SP);
+         uint8_t lowbyte = mem->read_memory(SP);
          SP++;
-         uint8_t highbyte = mem.read_memory(SP);
+         uint8_t highbyte = mem->read_memory(SP);
          SP++;
          PC = pair_registers (highbyte,lowbyte);
          return 5;
@@ -2626,9 +2719,9 @@ uint32_t execute_opcode () {
 
     else if (cc == 0b10) { //NC = not carry
         if (!C_flag) {
-         uint8_t lowbyte = mem.read_memory(SP);
+         uint8_t lowbyte = mem->read_memory(SP);
          SP++;
-         uint8_t highbyte = mem.read_memory(SP);
+         uint8_t highbyte = mem->read_memory(SP);
          SP++;
          PC = pair_registers (highbyte,lowbyte);
          return 5;
@@ -2639,9 +2732,9 @@ uint32_t execute_opcode () {
 
     else if (cc == 0b11) { //C = carry
         if (C_flag) {
-         uint8_t lowbyte = mem.read_memory(SP);
+         uint8_t lowbyte = mem->read_memory(SP);
          SP++;
-         uint8_t highbyte = mem.read_memory(SP);
+         uint8_t highbyte = mem->read_memory(SP);
          SP++;
          PC = pair_registers (highbyte,lowbyte);
          return 5;
@@ -2656,9 +2749,9 @@ uint32_t execute_opcode () {
  //opcode = 0b11011001
 
  else if (opcode == 0b11011001) {
-    uint8_t lowbyte = mem.read_memory(SP);
+    uint8_t lowbyte = mem->read_memory(SP);
     SP++;
-    uint8_t highbyte = mem.read_memory(SP);
+    uint8_t highbyte = mem->read_memory(SP);
     SP++;
     PC = pair_registers (highbyte,lowbyte);
 
@@ -2674,9 +2767,9 @@ uint32_t execute_opcode () {
     uint8_t adress = (opcode >> 3) & 0b00000111;
 
         SP--; //move to next empty space in stack pointer
-        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
         SP--; //stack grows downward
-        mem.write_memory (SP,PC & 0xFF);
+        mem->write_memory (SP,PC & 0xFF);
 
     if (adress == 0b000) PC = 0x0000; // RST 00
     else if (adress == 0b001) PC = 0x0008; // RST 08
@@ -2731,14 +2824,14 @@ std::cout << "unimplemented opcode : " << std::hex << +opcode << std::endl;
 }//function end
 
 uint8_t check_interupt () {
-    if (IF & IE & 0X1F) {
+    if ((mem->IF & mem->IE) & 0X1F) {
         interupt_pending = true;
-
-        if (IF & 0b00000001) return 0b00000001;
-        else if (IF & 0b00000010) return 0b00000010;
-        else if (IF & 0b00000100) return 0b00000100;
-        else if (IF & 0b00001000) return 0b00001000;
-        else if (IF & 0b00010000) return 0b00010000;
+        uint8_t interrupt = (mem->IF & mem->IE) & 0X1F;
+        if (interrupt & 0b00000001) return 0b00000001;//returns type of the interrupt
+        else if (interrupt & 0b00000010) return 0b00000010;
+        else if (interrupt & 0b00000100) return 0b00000100;
+        else if (interrupt & 0b00001000) return 0b00001000;
+        else if (interrupt & 0b00010000) return 0b00010000;
     }
      return 0;
 }
@@ -2758,41 +2851,37 @@ void handle_interupt() {
 
     if (IME && interupt_present) {
 
-       // IME = false;
+        IME = false;
 
         halted = false;
 
         SP--; //move to next empty space in stack pointer
-        mem.write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
         SP--; //stack grows downward
-        mem.write_memory (SP,PC & 0xFF);
+        mem->write_memory (SP,PC & 0xFF);
         
         PC = get_interupt_jump_adress(interupt_present);
 
-        IF &= ~(interupt_present); //clearing specific bit
+        mem->IF &= ~(interupt_present); //clearing specific bit
 
+        interrupt_serviced = true;
     }
 }
 
 int cpu_cycle() {
 
- handle_interupt(); //if cpu wakes up check if we can service an interupt
 
  if (halted) {
 
    if (check_interupt ()) {
 
-    halted = false; // if interupt is present wake cpu up
-
-    if (!IME) {
-    haltbug = true;
-    }
+    halted = false; // if interupt is present wake cpu up even if ime is 0
 
    }
 
-    else return 1; //else keep halted
+  else return 1; //else keep halted
 
-   }
+ }
 
    if (stopped) return 0;
 
@@ -2802,32 +2891,32 @@ int cpu_cycle() {
         ei_delay = 4;
     }
 
-          if (interrupt_serviced) {
-            machine_cycle += 5;
-            interrupt_serviced = false;
-          }
+    handle_interupt(); // check if we can service an interupt
 
-          return machine_cycle*4; //return machine cycle in tick cycle
+    if (interrupt_serviced) {
+        machine_cycle += 5;  //servicing an interrupt takes 5 machine cycle
+        interrupt_serviced = false;
+    }
 
-        }
+ return machine_cycle*4; //return machine cycle in tick cycle
+
+}
 
 
 void timer_tick() {
 
-    uint16_t prev_div_counter = mem.div_counter; //get current div
-    mem.div_counter++; //increment
-    mem.DIV = ((mem.div_counter >> 8) & 0xFF); //update
+    uint16_t prev_div_counter = mem->div_counter; //get current div
+    mem->div_counter++; //increment
+    mem->DIV = ((mem->div_counter >> 8) & 0xFF); //update
 
     bool timer_update = false;
-    bool timer_enabled = true;
-
-    if (! mem.timer_enabled()) timer_enabled = false; //timer disabled
+    bool timer_enabled = mem->timer_enabled();
 
     if (timer_enabled) {
-     int bit = mem.get_timer_bit();
+     int bit = mem->get_timer_bit();
 
      bool old_bit = (prev_div_counter >> bit) & 1;
-     bool new_bit = (mem.div_counter >> bit) & 1;
+     bool new_bit = (mem->div_counter >> bit) & 1;
 
      if (old_bit == 1 && new_bit == 0) {
         timer_update = true;
@@ -2836,70 +2925,545 @@ void timer_tick() {
 
    if (timer_update && timer_enabled) {
         
-        if (!mem.tima_overflow) {
+        if (!mem->tima_overflow) {
 
-             mem.TIMA++; //if timer is enabled and tima can update,increment tima
+             mem->TIMA++; //if timer is enabled and tima can update,increment tima
 
-            if (mem.TIMA == 0x00) { //if tima overflows
-            mem.tima_overflow = true;
-            mem.tima_reload_delay = 4;
+            if (mem->TIMA == 0x00) { //if tima overflows
+            mem->tima_overflow = true;
+            mem->tima_reload_delay = 4;
             }
 
         }
 
     }
 
-    if (mem.tima_overflow) {
+    if (mem->tima_overflow) {
 
-            if (mem.tima_reload_delay == 0) {
-                mem.TIMA = mem.TMA;
-                mem.tima_overflow = false;
+            if (mem->tima_reload_delay == 0) {
+                mem->TIMA = mem->TMA;
+                mem->tima_overflow = false;
                 request_interrupt('T');
             }
-            else mem.tima_reload_delay--;
-
-        }
+            else mem->tima_reload_delay--;
 
     }
 
-
-
-
-void execute_tick_cycle() {
-   timer_tick();
 }
 
-void game_clock () {
+};
 
-   while (true) {
+struct ppu {
 
-       if (!ticks_remaining) ticks_remaining = cpu_cycle();
+ memory* mem;
+
+ ppu (memory* memory) {
+    mem = memory;
+   internal_ppu_ticks = 0;
+ }
+
+ int internal_ppu_ticks; //ppu clock
+
+ //these are the data of sprite stored in oam,a sprite is group of 4 bytes in oam
+ uint8_t sprite_y;          //1st byte
+ uint8_t sprite_x;          //2nd byte
+ uint8_t sprite_tile;       //3rd byte
+ uint8_t sprite_attribute;  //4th byte
+
+ //oam search : ppu searches the oam,oam has 40 sprites ,each 4 byte,in oam search
+ //ppu searches the oam sprites to check which sprites meet height criteria for 
+ //current scanline ,height of sprite can be 8 pixel or 16 pixel ,it depends on bit 2 
+ //of lcdc register
+
+ int sprite_height () { 
+    if (mem->LCDC & 0b00000100) return 16;
+    else return 8;
+ }
+
+ uint8_t loadable_sprite_table [40]; // oam search can store maximum 10 sprite per scanline out of 40 in gameboy classic
+ // we will store all loadable sprites in this table
+
+ uint8_t pixel_buffer [160]; //the viewing screen of gameboy is 160x144 pixels,each scanline is
+ // 1 row of pixel aka 160 pixel,we will pixel data for 1 scanline in this buffer to draw it
+
+uint8_t frame_buffer [144] [160]; //this is the entire visible screen 144 scanline and 160 pixel each
+
+
+ //now lets make functions to create frame buffer and drawing data
+
+ void draw_background_pixels () {
+
+    if (!(mem->LCDC & 0b00000001)) return; //if lcdc bit 0 is 0 both bg and window are disabled
+
+    int scanline = mem->LY; //current scanline information
+    int scroll_y = mem->SCY; // scy register decides which 144 out of 256 background pixel will
+    // be rendered on visible screen,meaning it decides the starting position 
+    int scroll_x = mem->SCX; //scx register decides which 160 out of 256 background pixel will
+    // be rendered on visible screen,meaning it decides the starting position 
+    uint16_t verticle_pixel = (scanline + scroll_y) & 0XFF;//which verticle pixel is about to be drawn,
+    //masked to 0xff so it ranges from 0-255,and 256 gets rounded off to 0 again
+
+    uint8_t tile_row = verticle_pixel / 8; //we are getting which row of background tile map
+    // to use ,as scroll_y is defined in pixel we divide the whole by 8 to get tile row;
+    uint8_t row_inside_tile = verticle_pixel % 8;//this tells which pixel row inside the tile we will load
+
+    //now lets fill the buffer 
+
+    for (int screen_x = 0; screen_x < 160; screen_x++) {
+        uint16_t horizontal_pixel = (scroll_x + screen_x) & 0XFF; //tells which horizontal pixel we are looking at the screen
+        uint8_t tile_column = horizontal_pixel / 8; //tells the column of tile
+        uint8_t pixel_inside_tile = horizontal_pixel % 8;  //tells how many pixels deep in a tile we are
+
+        uint16_t index_start_pos;
+        bool start = (mem->LCDC & 0b00001000); //controlled by lcdc bit 3;
+        if (start == 0) index_start_pos = 0x9800 - 0x8000;
+        else index_start_pos = 0x9C00 - 0x8000;
+
+        uint8_t tile_index = mem->ram [index_start_pos + tile_row*32 + tile_column]; //this fetches which tile will go here
+        //now each tile is 16 byte ,now we will use this index to access tile data storing region of vram
+
+        //lcdc bit 4 actually decides if the data stored in vrm ox8000 to 0x97ff is gonna be interpreted as 
+        //signed int or unsigned int
+
+        uint16_t tile_data_start;
+        uint16_t tile_data_address;
+
+        if (mem->LCDC & 0b00010000) {
+            tile_data_start = 0x8000 - 0x8000;
+            tile_data_address = tile_data_start + (tile_index * 16);}
+        else {
+            int8_t signed_tile_index = (int8_t) tile_index; //for signed data, we cast index as signed and start from 9000
+            tile_data_start = 0x9000 - 0x8000;
+            tile_data_address = tile_data_start + (signed_tile_index * 16);
+        }
+
+        uint16_t row_adress = tile_data_address + (row_inside_tile * 2); //this gives the address of the pixel row inside tile we want
+        //we multiply it by 2 because a gameboy pixel is 2 bit each row has 8 pixel hence 2 byte
+        //so now we have exact pixel address which to load
+
+        //now lets fetch 2 byte data for the pixel row,low byte first the high
+
+        uint8_t lowbyte = mem->ram[row_adress]; //bit 76543210 represents low bit of pixel 76543210;
+        uint8_t highbyte = mem->ram[row_adress+1];//bit 76543210 represents high bit of pixel 76543210;
+
+        //now we have data for the whole pixel row,but data for each pixel colour data is stored differently
+        //each pixel is 2 bit,bit 0 is from low byte and bit 1 is from high byte
+
+        //lets fetch colour for  a pixel
+        //first locate whivh pixel
+
+        uint8_t pixel = 7 - pixel_inside_tile;  //7th bit is the highest bit,bit is stored in memory as 7654---0,so 
+        //we are reversing the order by minusing pixel inside tile from msb;becauuse high and lowbyte is also stored as
+        //76543210;
+
+        uint8_t colour = (((highbyte >> pixel) & 1) << 1) | ((lowbyte >> pixel) & 1); //now low bit and high bit is set
+        //its masked with one so we only get o and 1;
+        uint8_t shade = (mem->BGP >> (colour * 2)) & 0X03; //choosing final shade from pallete register
+        //now we have the colour of the pixel ,lets load it in pixel buffer
+        pixel_buffer[screen_x] = shade;
+        //so when this loop ends we will have colour of entire scan line background
+    }
+ }
+
+ void draw_window_pixel () {
+    //5th bit of lcdc register decides if window is enabled or not
+    if (!(mem->LCDC & 0b00100000)) return;
+    if (!(mem->LCDC & 0b00000001)) return; //if lcdc bit 0 is 0 both bg and window are disabled
+    //if window is enabled we will start drawing window,the scanline window will be drawn is
+    //decided by wy and pixel position is decided by wx
+
+    bool draw_window = false;
+    if ((mem->LY >= mem->WY) && (mem->WX <= 166)) draw_window = true; //we are using 166 because 
+    // real windowx = wx -7;so its actually 159,,hardwire quirk!!!
+    else return; //if we cannot draw a window in current scanline,return
+
+    //now lets get information regarding pixel and tiles,
+    //window is nonscr0llable ,so scx and scy wont come in play here
+
+    uint8_t scanline = mem->LY;
+    uint8_t veritcle_pixel = scanline - mem->WY; //if its 0 means its first window pixel row
+    uint8_t tile_row = veritcle_pixel / 8; //gives the tile row
+    uint8_t row_in_tile = veritcle_pixel % 8; //gives which pixel we are starting in selected tile
+
+    for (int screen_x = 0; screen_x < 160 ; screen_x++) {
+        int window_start = mem->WX - 7;
+        if (window_start < 0) window_start = 0; //prevents underflow bug
+        if (screen_x < window_start) continue; //window wont be drawn in current pixel if wx - 7 < screenx;
+
+        uint8_t window_x = screen_x - (mem->WX - 7);
+        uint8_t tile_column = window_x / 8;
+        uint8_t pixel_in_tile = window_x % 8;
+
+        uint16_t index_start_pos = (mem->LCDC & 0b01000000); //controlled by lcdc bit 6;
+        if (index_start_pos == 0) index_start_pos = 0x9800 - 0x8000;
+        else index_start_pos = 0x9C00 - 0x8000;
+
+        uint8_t tile_index = mem->ram [index_start_pos + tile_row*32 + tile_column]; //this fetches which tile will go here
+
+        uint16_t tile_data_start;
+        uint16_t tile_data_address;
+
+        if (mem->LCDC & 0b00010000) {
+            tile_data_start = 0x8000 - 0x8000;
+            tile_data_address = tile_data_start + (tile_index * 16);}
+        else {
+            int8_t signed_tile_index = (int8_t) tile_index; //for signed data, we cast index as signed and start from 9000
+            tile_data_start = 0x9000 - 0x8000;
+            tile_data_address = tile_data_start + (signed_tile_index * 16);
+        }
+
+        uint16_t tile_row_address = tile_data_address + (row_in_tile * 2);
+
+        uint8_t lowbyte = mem->ram [tile_row_address];
+        uint8_t highbyte = mem->ram [tile_row_address+1];
+
+        uint8_t pixel = 7 - pixel_in_tile;
+        uint8_t colour = (((highbyte >> pixel) & 1) << 1) | ((lowbyte >> pixel) & 1);
+        uint8_t shade = (mem->BGP >> (colour * 2)) & 0X03; //choosing final shade from pallete register
+        pixel_buffer[screen_x] = shade;
+    }
+ }
+
+ void draw_sprite_pixel () {
+    if (!(mem->LCDC & 0b00000010)) return; //lcdc bit 1 decides if drawing sprites is enabled or not
+    uint8_t height = sprite_height();
+    for (int sprite_count = 0; sprite_count < 40 ;sprite_count++) {
+
+        sprite_y = loadable_sprite_table[sprite_count];
+        sprite_count++;
+        sprite_x = loadable_sprite_table[sprite_count];
+        sprite_count++;
+        sprite_tile = loadable_sprite_table[sprite_count];
+        sprite_count++;
+        sprite_attribute = loadable_sprite_table[sprite_count];
+
+        int screen_x =  sprite_x - 8; //oam stores positions with offsets,so convert them
+        //to screen pixel
+        int screen_y = sprite_y - 16;
+
+        if ( mem->LY < screen_y || mem-> LY >= screen_y + height) continue; //if sprite is not in current scanline vertically,continue
+        //now figure out which row of sprite pixels to draw in curreny scanline
+
+        uint16_t row = mem->LY - screen_y;
+
+        //now handle flip : sprite attribuute bit 6 decides if sprite rows will be flipped or not
+        //meaning 012345678 can be 876543210 if bit 6 = 1;
+
+        if (sprite_attribute & 0b01000000) row = (height - row) - 1; //to flip we are gonna minus heigh of the
+        //sprite with row ,but as row index starts from 0 we are gonna subtract a 1 from it;
+
+        //handle 8X16 sprites : oam stores only 1 tile index but 8 X 16 sprites are 2 tiles stacked vertically
+        //hardware forces the sprite index to be even in 8X16 sprites so only 1 pair of top and bottom half existt
+        //so by a index we will decide if its top or bottom half;
+
+        if (height == 16) {
+
+            sprite_tile &= 0xFE ; //sprite tile is forced to be even,hardwire does this
+
+            if (row >= 8) { //bottom half
+                sprite_tile += 1; //so we move to next tile,but because we forced index to be even
+                //this tile cannot be a top tile for the next tile
+                row -= 8;  //because a tile only has 8 rows of pixel
+            }
+        }
+
+            //now lets fetch tile data,data is stored in vram 8000 to 8fff
+            uint16_t tile_data_start = 0x8000 - 0x8000; //it starts from vram 0,lol
+            uint16_t tile_address = tile_data_start + sprite_tile*16;
+            uint16_t tile_row_address = tile_address + row*2; //decides which row of pixel from selected tile to draw,
+            //each row is of 2 byte
+
+            //tile data
+
+            uint8_t lowbyte = mem->ram [tile_row_address];
+            uint8_t highbyte = mem->ram [tile_row_address+1];
+
+            //now get the pixel data
+
+
+            for (int column = 0 ; column < 8 ; column++) { //now we need individual  pixel data and load it in pixel buffer
+                //in background and window pixel we draw every horizpntal pixel in a loop for visible screen,but during
+                //sprite we are not looping every visible screen pixel,so we need to calculate screenx with column of the row
+                // and get to individual pixels 
+
+                int bit;
+                if (sprite_attribute & 0b00100000) bit = column; //x flip , decided by bit 5 of attribute
+                else bit = 7 - column; //7th bit is the highest bit,bit is stored in memory as 7654---0,so 
+             //we are reversing the order by minusing pixel inside tile from msb;becauuse high and lowbyte is also stored as
+             //76543210;so during x flip we just dont flip
+                uint8_t colour = (((highbyte >> bit) & 1) << 1) | ((lowbyte >> bit) & 1);
+                if (colour == 0) continue; //if colour of sprite pixel is 0,background/window should remain visible
+                int pixel_x = screen_x + column; //position where pixel will be drawn
+                if (pixel_x < 0 || pixel_x >= 160) continue; //if its outside visible screen continue
+
+                //now we need to check if sprite is behind background,sprite attribute bit 7 decides that
+
+                if ((sprite_attribute & 0b10000000) && (pixel_buffer [pixel_x] != 0)) continue; 
+                //dont draw sprite pixel as its behind background,but if background colour is 0,we draw sprite pixel
+
+                //now lets choose sprite colour pallete
+                //it can be choosen from 2 registers,obp0 and obp1,attribute bit 4 decides that
+                uint8_t pallete = 0;
+                if (sprite_attribute & 0b00010000) pallete = mem->OBP1;
+                else pallete = mem->OBP0;
+
+                //now inside pallete colours are stored in 2 bit groups ,we will extract the colour
+
+                uint8_t shade = (pallete >> (colour*2)) & 3; //final shade 
+                pixel_buffer [pixel_x] = shade;
+
+            }
+        }
+    }
+
+ //ppu has 4 modes : lets write them here
+
+ void oam_search () {  //mode 2
+    //uint8_t value = (mem->STAT & 0b11111100);
+    //mem->STAT = (value | 0b10);
+
+    if (mem->STAT & 0b00100000) mem->IF |=  (1 << 1); //fire lcd stat interrupt
+
+     mem->oam_search = true;
+    int marker = 0; //marks the begining of the loadable sprite table array;set to 0 at the start of the search
+    // so it looks at the start of the table
+
+    for (int i = 0; i < 40 ; i++) {
+        loadable_sprite_table [i] = 0; //clear prev table
+    }
+
+    for (int sprite_count = 0 ; sprite_count < 40 ; sprite_count++) {
+        for (int sprite_data_table = 0; sprite_data_table < 4 ; sprite_data_table++) {
+
+            uint8_t sprite_data = mem->ram [(0XFE00 - 0X8000) + (sprite_count * 4 + sprite_data_table)];
+
+            switch (sprite_data_table) {
+                case 0 : sprite_y = sprite_data; break;
+                case 1 : sprite_x = sprite_data; break;
+                case 2 : sprite_tile = sprite_data; break;
+                case 3 : sprite_attribute = sprite_data; break;
+            }
+
+        }// for j
+
+        int sprite_top = sprite_y - 16; //it is subtracted with 16 as in gameboy sprite can be 16 pixel above
+        // the visible screen and 8 pixel below visible screen ,so we check from very top
+        int height = sprite_height(); //height of sprite depends on lcdc register
+        int sprite_bottom = sprite_top + height;
+
+        //LY register holds the information of current scanline,so now we have to check if our sprite
+        //is in current scanline or not
+
+        if (mem->LY >= sprite_top && mem->LY < sprite_bottom) {
+
+            //if it meets we store the sprite in sprite table
+
+            loadable_sprite_table[marker] = sprite_y;
+            marker++;
+            loadable_sprite_table[marker] = sprite_x;
+            marker++;
+            loadable_sprite_table[marker] = sprite_tile;
+            marker++;
+            loadable_sprite_table[marker] = sprite_attribute;
+            marker++;
+
+            if (marker >= 40) break; //cant store more than 10 sprite per scanline
+
+        }
+
+    }//for  i
+ }
+
+ void pixel_transfer () { //mode 3 
+    
+
+    mem->ppu_pixel_transfer = true;
+
+    if (mem->LY >= 144) return; //pixel transfer will only happemn for  visible scanline
+    //create pixel buffer
+    draw_background_pixels();
+    draw_window_pixel();
+    draw_sprite_pixel();
+    //load onto frame buffer for current scanline
+    for (int i = 0; i < 160 ; i++) {
+        frame_buffer [mem->LY] [i] = pixel_buffer[i];
+    }
+ }
+
+ void h_blank() { //mode 0,resting phase after finshing 160 pixels for a  scanline
+    uint8_t value = (mem->STAT & 0b11111100);
+    mem->STAT = (value | 0b00);
+
+    if (mem->STAT & 0b00001000) mem->IF |=  (1 << 1); //fire lcd stat interrupt
+
+    mem->ppu_pixel_transfer = false;
+    mem->oam_search = false;
+    //eat 5 star and do nothing
+ }
+
+ void v_blank() { //mode 1
+    uint8_t value = (mem->STAT & 0b11111100);
+    mem->STAT = (value | 0b01);
+
+    if (mem->STAT & 0b00010000) mem->IF |=  (1 << 1); //fire lcd stat interrupt
+
+    if (mem->LY == 144) mem->IF |= (1 << 0); //fire vblank interrupt
+
+ }
+
+ void ppu_tick() {
+
+    bool LYC_interrupt_enable = (mem->STAT & 0b01000000);
+
+    if (mem->LY == mem->LYC) {
+
+        mem->STAT |= 0b00000100;
+
+        if (LYC_interrupt_enable) mem->IF |=  (1 << 1); //fire lcd stat interrupt
+
+    }
+
+    else mem->STAT &= 0b11111011; //else force thhat bit to 0
+
+    if (internal_ppu_ticks == 456) {
+        internal_ppu_ticks = 0;
+        mem->LY++;
+
+         if (mem->LY == 144) {
+         v_blank();
+         render_frame(frame_buffer);
+         }
+
+         else if (mem->LY == 154) mem->LY = 0;
+
+    }
+
+    if (internal_ppu_ticks == 0) oam_search();
+
+    else if (internal_ppu_ticks == 80) pixel_transfer();
+
+    else if (internal_ppu_ticks == 252) h_blank();
+
+   internal_ppu_ticks++;
+
+ }
+ 
+};
+
+struct game_clock { 
+//this struct controls the gameclock and syncs memory cpu ppu and other components
+ memory mem;
+ cpu CPU;
+ ppu PPU;
+
+ game_clock() : CPU(&mem) , PPU (&mem) {
+
+ }
+
+//game_clock related variables :
+const double main_clock = 4194304.0 ;  //gameboy main clock oscilates at 4.194304 million hertz per second
+// so 1 clock cycle is 1/4.19mill seconds long
+
+int ticks_remaining = 0; // Number of remaining T-cycles the CPU provided.it is Set to (M-cycles * 4) when an instruction starts.
+// While > 0, the CPU cannot fetch a new opcode,but the global clock (PPU, timers, DMA) keeps running.
+//this emulates the  sense of time that the actual cpu needs time to execute hardware tasks
+
+ void execute_tick_cycle() {
+   CPU.timer_tick();
+   PPU.ppu_tick();
+}
+
+void clock_tick () {
+
+       if (!ticks_remaining) {
+        ticks_remaining = CPU.cpu_cycle();
+       }
 
        while (ticks_remaining) {
 
-        if (IME_scheduled) {
-            if (!ei_delay) {
-                IME = true;
-                IME_scheduled = false;
+        if (CPU.IME_scheduled) {
+            if (!CPU.ei_delay) {
+                CPU.IME = true;
+                CPU.IME_scheduled = false;
             }
-            else ei_delay--;
+            else CPU.ei_delay--;
         }
           execute_tick_cycle();
           ticks_remaining--;
 
         }
 
-    }
-
 }
+
 };
 
 void todo_list () {
-// add halt, should execute before ld even starts
-// add stop clock insruction later
+// add halt, should execute before ld checks even starts : done
+// add stop clock insruction later : done
+// check for tac very specific edge case later (new enabled) : not done
+// add conditions for ending stop : not done
 }
 
-int main () {
-    cpu a;
-    a.game_clock();
+    //renderer part with sfml 3.0
+
+ sf::RenderWindow window (sf::VideoMode ( sf::Vector2u (160,144)),"gameboy_classic");
+ sf::Texture texture;
+ sf::Sprite sprite(texture);
+
+ void init_renderer () {
+    if(!texture.resize({160,144}))
+        std::cout << "Texture failed\n";
+        sprite.setTexture(texture,true);
+ }
+void render_frame(uint8_t framebuffer[144][160]) {
+    static uint8_t pixels[160 * 144 * 4];
+
+    for (int y = 0; y < 144; y++)
+    {
+        for (int x = 0; x < 160; x++)
+        {
+            uint8_t shade = framebuffer[y][x];
+
+            uint8_t color;
+
+            switch (shade)
+            {
+                case 0: color = 255; break;
+                case 1: color = 170; break;
+                case 2: color = 85; break;
+                case 3: color = 0; break;
+            }
+
+            int i = (y * 160 + x) * 4;
+
+            pixels[i+0] = color;
+            pixels[i+1] = color;
+            pixels[i+2] = color;
+            pixels[i+3] = 255;
+        }
+    }
+
+    texture.update(pixels);
+
+    window.clear();
+    window.draw(sprite);
+    window.display();
+}
+
+int main()
+{
+    init_renderer();
+
+    game_clock gameboy;
+
+    while (window.isOpen())
+    {
+        while (auto event = window.pollEvent())
+        {
+            if (event->is<sf::Event::Closed>())
+                window.close();
+        }
+
+        gameboy.clock_tick();
+    }
 }
