@@ -51,7 +51,7 @@ memory () {
 bool map_rom_cartridge() {
 //for more documentation read microsofts memory mapped io in windows
 
-game_file = CreateFileA("01-read_timing.gb",GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_READONLY,NULL);
+game_file = CreateFileA("cpu_instrs.gb",GENERIC_READ,FILE_SHARE_READ,NULL,OPEN_EXISTING,FILE_ATTRIBUTE_READONLY,NULL);
 //if handle generation fails it returns invalid_handle_value.
 if (game_file == INVALID_HANDLE_VALUE) {
     std::cerr << "HANDLE CREATION FOR GAMEFILE FAILED" << std::endl;
@@ -119,7 +119,9 @@ uint8_t read_memory (uint16_t adress) const {  //read from cartridge rom
 }
 
 void write_memory(uint16_t address, uint8_t value) {
-    //R0M write
+
+     //R0M write
+
     if ( address < 0x8000 ) {
         return; //rom address,should not write
     }
@@ -332,7 +334,6 @@ bool mapping_status = false;
 bool ppu_pixel_transfer = false; //during ppu pixel transfer writes to oam and vram are disabled and read returns 0xff
 bool oam_search = false;
 
-
 };
 
 struct cpu {
@@ -391,6 +392,28 @@ bool haltbug = false;
 bool interrupt_serviced = false;
 
 int ei_delay = 0;
+
+//cycle accuracy related variables and flags
+
+uint8_t opcode = 0x00;
+uint8_t cb_opcode = 0x00;
+uint8_t n = 0;
+uint8_t n1 = 0;
+uint8_t n2 = 0;
+int8_t e = 0;
+uint8_t highbyte = 0;
+uint8_t lowbyte = 0;
+uint8_t inc_dec_value = 0x00;// only used for inc hl and dec hl
+uint8_t inc_dec_old_value = 0x00; //  only used for inc hl and dec hl
+bool take_conditional_jump = false;
+
+uint8_t cb_value = 0x00;
+uint16_t cb_adress = 0x0000; //these value and address will be used in alu rrca and rlca for cb opcode alu operations
+
+int current_machine_cycle = 0;
+
+bool fetch_new_instruction = true;
+
 
 //now lets make paired registers : 
 
@@ -778,25 +801,32 @@ void alu_inc_memory (uint8_t& register1 , uint8_t& register2) {
 
     uint16_t paired_register = pair_registers (register1,register2);
 
-    uint8_t value = mem->read_memory(paired_register);
+    if (current_machine_cycle == 1) {
 
-    uint8_t old_value = value;//preserving old value for half carry check
+     inc_dec_value = mem->read_memory(paired_register);
 
+     inc_dec_old_value = inc_dec_value;//preserving old value for half carry check
 
-    value++;
+    }
 
-    mem->write_memory(paired_register,value);
+    else if (current_machine_cycle == 2) {
 
-    if (value == 0) set_flag ('Z', 1);
+    inc_dec_value++;
+
+    mem->write_memory(paired_register,inc_dec_value);
+
+    if (inc_dec_value == 0) set_flag ('Z', 1);
     else set_flag ('Z', 0);
 
     set_flag ('N', 0);
 
-    if ((old_value & 0xF) == 0xF ) set_flag ('H', 1); //checking if half overflow has happened
+    if ((inc_dec_old_value & 0xF) == 0xF ) set_flag ('H', 1); //checking if half overflow has happened
     else set_flag ('H', 0);
 
 
     //no flags will be touched here
+
+    }
 
 }
 
@@ -830,24 +860,31 @@ void alu_dec_reg (uint8_t& register1) {
 }
 
 void alu_dec_memory (uint8_t& register1 , uint8_t& register2) {
+ uint16_t paired_register = pair_registers (register1,register2);
 
-    uint16_t paired_register = pair_registers (register1,register2);
+    if (current_machine_cycle == 1) {
 
-    uint8_t value = mem->read_memory(paired_register);
+     inc_dec_value = mem->read_memory(paired_register);
 
-    uint8_t old_value = value;//preserving old value for half carry check
+     inc_dec_old_value = inc_dec_value;//preserving old value for half carry check
 
-    value--;
+    }
 
-    mem->write_memory(paired_register,value);
+    else if (current_machine_cycle == 2) {
 
-    if (value == 0) set_flag ('Z', 1);
+    inc_dec_value--;
+
+    mem->write_memory(paired_register,inc_dec_value);
+
+    if (inc_dec_value == 0) set_flag ('Z', 1);
     else set_flag ('Z', 0);
 
     set_flag ('N', 1);
 
-    if ((old_value & 0xF) == 0x0 ) set_flag ('H', 1); //checking if half overflow has happened
+    if ((inc_dec_old_value & 0xF) == 0x0 ) set_flag ('H', 1); //checking if half overflow has happened
     else set_flag ('H', 0);
+
+    }
 
 }
 
@@ -1022,16 +1059,20 @@ void alu_rotate_left_circular (uint8_t& register1) {
 }
 
 void alu_rotate_left_circular_memory_adress(uint8_t& register1, uint8_t& register2) {
-    uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem->read_memory(adress);
 
-    bool fallen_bit = (value >> 7);
+    if (current_machine_cycle == 2) {
+     cb_adress = pair_registers(register1,register2);
+     cb_value = mem->read_memory(cb_adress);
+    }
 
-    value = (value << 1) | fallen_bit;
+    else if (current_machine_cycle == 3) {
+    bool fallen_bit = (cb_value >> 7);
 
-    mem->write_memory(adress,value);
+    cb_value = (cb_value << 1) | fallen_bit;
 
-    if (value == 0x00) set_flag ('Z',1);
+    mem->write_memory(cb_adress,cb_value);
+
+    if (cb_value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
 
     set_flag ('N',0);
@@ -1039,6 +1080,8 @@ void alu_rotate_left_circular_memory_adress(uint8_t& register1, uint8_t& registe
     set_flag ('H',0); 
 
     set_flag ('C',fallen_bit);
+    }
+
 }
 
 void alu_rotate_right_circular (uint8_t& register1) {
@@ -1062,16 +1105,21 @@ void alu_rotate_right_circular (uint8_t& register1) {
 }
 
 void alu_rotate_right_circular_memory_adress(uint8_t& register1, uint8_t& register2) {
-    uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem->read_memory(adress);
 
-    bool fallen_bit = (value & 0x01);
+    if (current_machine_cycle == 2) {
+     cb_adress = pair_registers(register1,register2);
+     cb_value = mem->read_memory(cb_adress);
+    }
 
-    value = (value >> 1) | (fallen_bit << 7);
+    else if (current_machine_cycle == 3) {
 
-    mem->write_memory(adress,value);
+    bool fallen_bit = (cb_value & 0x01);
 
-    if (value == 0x00) set_flag ('Z',1);
+    cb_value = (cb_value >> 1) | (fallen_bit << 7);
+
+    mem->write_memory(cb_adress,cb_value);
+
+    if (cb_value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
 
     set_flag ('N',0);
@@ -1079,6 +1127,8 @@ void alu_rotate_right_circular_memory_adress(uint8_t& register1, uint8_t& regist
     set_flag ('H',0); 
 
     set_flag ('C',fallen_bit);
+
+    }
 }
 
 void alu_rotate_left_carry(uint8_t& register1) {
@@ -1099,18 +1149,22 @@ void alu_rotate_left_carry(uint8_t& register1) {
 }
 
 void alu_rotate_left_carry_memory_adress(uint8_t& register1,uint8_t& register2) {
+
+    if (current_machine_cycle == 2) {
+      cb_adress = pair_registers(register1,register2);
+      cb_value = mem->read_memory(cb_adress);
+    }
+
+    else if (current_machine_cycle == 3) {
+
     bool old_carry = get_flag('C');
+    bool fallen_bit = (cb_value >> 7);
 
-    uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem->read_memory(adress);
+    cb_value = (cb_value << 1) | old_carry;
 
-    bool fallen_bit = (value >> 7);
+    mem->write_memory(cb_adress,cb_value);
 
-    value = (value << 1) | old_carry;
-
-    mem->write_memory(adress,value);
-
-    if (value == 0x00) set_flag ('Z',1);
+    if (cb_value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
 
     set_flag ('N',0);
@@ -1118,6 +1172,8 @@ void alu_rotate_left_carry_memory_adress(uint8_t& register1,uint8_t& register2) 
     set_flag ('H',0); 
 
     set_flag ('C',fallen_bit);
+
+    }
 
 }
 
@@ -1139,18 +1195,22 @@ void alu_rotate_right_carry(uint8_t& register1) {
 }
 
 void alu_rotate_right_carry_memory_adress(uint8_t& register1,uint8_t& register2) {
+
+    if (current_machine_cycle == 2) {
+     cb_adress = pair_registers(register1,register2);
+     cb_value = mem->read_memory(cb_adress);
+    }
+
+    else if (current_machine_cycle == 3) {
+
     bool old_carry = get_flag('C');
+    bool fallen_bit = (cb_value & 0x01);
 
-    uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem->read_memory(adress);
+    cb_value = (cb_value >> 1) | (old_carry << 7);
 
-    bool fallen_bit = (value & 0x01);
+    mem->write_memory(cb_adress,cb_value);
 
-    value = (value >> 1) | (old_carry << 7);
-
-    mem->write_memory(adress,value);
-
-    if (value == 0x00) set_flag ('Z',1);
+    if (cb_value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
 
     set_flag ('N',0);
@@ -1158,6 +1218,7 @@ void alu_rotate_right_carry_memory_adress(uint8_t& register1,uint8_t& register2)
     set_flag ('H',0); 
 
     set_flag ('C',fallen_bit);
+    }
 
 }
 
@@ -1178,14 +1239,18 @@ void alu_shift_left (uint8_t& register1) {
 }
 
 void alu_shift_left_memory_adress (uint8_t& register1,uint8_t& register2) {
-    uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem->read_memory(adress);
 
-    bool fallen_bit = (value >> 7);
-    value <<= 1;
-    mem->write_memory(adress,value);
+    if (current_machine_cycle == 2) {
+     cb_adress = pair_registers(register1,register2);
+     cb_value = mem->read_memory(cb_adress);
+    }
 
-    if (value == 0x00) set_flag ('Z',1);
+    else if (current_machine_cycle == 3) {
+    bool fallen_bit = (cb_value >> 7);
+    cb_value <<= 1;
+    mem->write_memory(cb_adress,cb_value);
+
+    if (cb_value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
 
     set_flag ('N',0);
@@ -1193,6 +1258,7 @@ void alu_shift_left_memory_adress (uint8_t& register1,uint8_t& register2) {
     set_flag ('H',0); 
 
     set_flag ('C',fallen_bit);
+    }
 }
 
 void alu_shift_right (uint8_t& register1) {
@@ -1212,16 +1278,21 @@ void alu_shift_right (uint8_t& register1) {
 }
 
 void alu_shift_right_memory_adress (uint8_t& register1,uint8_t& register2) {
-    uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem->read_memory(adress);
 
-    bool fallen_bit = (value & 0x01);
-    bool preserved_bit = (value >> 7);
-    value = (value >> 1) | (static_cast<uint8_t>(preserved_bit) << 7);
+    if (current_machine_cycle == 2) {
+    cb_adress = pair_registers(register1,register2);
+    cb_value = mem->read_memory(cb_adress);
+    }
 
-    mem->write_memory(adress,value);
+    else if (current_machine_cycle == 3) {
 
-    if (value == 0x00) set_flag ('Z',1);
+    bool fallen_bit = (cb_value & 0x01);
+    bool preserved_bit = (cb_value >> 7);
+    cb_value = (cb_value >> 1) | (static_cast<uint8_t>(preserved_bit) << 7);
+
+    mem->write_memory(cb_adress,cb_value);
+
+    if (cb_value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
 
     set_flag ('N',0);
@@ -1229,6 +1300,7 @@ void alu_shift_right_memory_adress (uint8_t& register1,uint8_t& register2) {
     set_flag ('H',0); 
 
     set_flag ('C',fallen_bit);
+    }
 }
 
 void alu_shift_right_logical (uint8_t& register1) {
@@ -1248,14 +1320,18 @@ void alu_shift_right_logical (uint8_t& register1) {
 }
 
 void alu_shift_right_logical_memory_adress (uint8_t& register1,uint8_t& register2) {
-    uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem->read_memory(adress);
 
-    bool fallen_bit = (value & 0x01);
-    value >>= 1;
-    mem->write_memory(adress,value);
+    if (current_machine_cycle == 2) {
+    cb_adress = pair_registers(register1,register2);
+    cb_value = mem->read_memory(cb_adress);
+    }
 
-    if (value == 0x00) set_flag ('Z',1);
+    else if (current_machine_cycle == 3) {
+    bool fallen_bit = (cb_value & 0x01);
+    cb_value >>= 1;
+    mem->write_memory(cb_adress,cb_value);
+
+    if (cb_value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
 
     set_flag ('N',0);
@@ -1263,6 +1339,7 @@ void alu_shift_right_logical_memory_adress (uint8_t& register1,uint8_t& register
     set_flag ('H',0); 
 
     set_flag ('C',fallen_bit);
+    }
 }
 
 void alu_swap (uint8_t& register1) {
@@ -1281,14 +1358,18 @@ void alu_swap (uint8_t& register1) {
 
 void alu_swap_memory (uint8_t& register1 ,uint8_t& register2) {
     //swap upper nibble with lower nibble
-    uint16_t adress = pair_registers(register1,register2);
-    uint8_t value = mem->read_memory(adress);
 
-    value = (value << 4) | (value >> 4);
+    if (current_machine_cycle == 2) {
+    cb_adress = pair_registers(register1,register2);
+    cb_value = mem->read_memory(cb_adress);
+    }
 
-    mem->write_memory(adress,value);
+    else if (current_machine_cycle == 3) {
+    cb_value = (cb_value << 4) | (cb_value >> 4);
 
-    if (value == 0x00) set_flag ('Z',1);
+    mem->write_memory(cb_adress,cb_value);
+
+    if (cb_value == 0x00) set_flag ('Z',1);
     else set_flag ('Z',0);
 
     set_flag ('N',0);
@@ -1296,6 +1377,7 @@ void alu_swap_memory (uint8_t& register1 ,uint8_t& register2) {
     set_flag ('H',0); 
 
     set_flag ('C',0);
+    }
 }
 
 void alu_test_bit (uint8_t ref_reg,uint8_t bit_mask) { //bitmask will be used as 0b00100000 for 5th bit testing
@@ -1395,10 +1477,15 @@ int8_t fetch_rawbyte () { //for getting signed int when needed
 }
 
 
-
 uint32_t execute_opcode () {
 
- uint8_t opcode = fetch_opcode();
+ if (fetch_new_instruction) {
+
+     opcode = fetch_opcode();
+     fetch_new_instruction = false;
+     current_machine_cycle = 0; //restarting current machine cycle count
+
+ }
 
  if (opcode == 0b01110110) {
     //halt :  0b01110110 is cpu a instruction called halt 
@@ -1407,6 +1494,7 @@ uint32_t execute_opcode () {
     } else {
      halted = true;
     }
+    fetch_new_instruction = true;
     return 1;//it returns 1 machine cycle
  }
 
@@ -1421,17 +1509,24 @@ uint32_t execute_opcode () {
 
  else if ((opcode & 0b11000000) == 0b01000000) {  //masking first 2 digit and letting 01 in only
     //now lets get value of last register and store it in value (r')
+
     uint8_t value = 0b00000000;
     uint8_t last_register = opcode & 0b00000111; //only keep last 3 bbits
 
-     if (last_register == 0b000) value = B; //here 000 after 0b represents last 3 bits from right(in lower nibble)
-     else if (last_register == 0b001) value = C;
-     else if (last_register == 0b010) value = D;
-     else if (last_register == 0b011) value = E;
-     else if (last_register == 0b100) value = H;
-     else if (last_register == 0b101) value = L;
-     else if (last_register == 0b110) value = mem->read_memory(pair_registers(H,L)); //value at memory adress pointed by (HL)
-     else if (last_register == 0b111) value = A;
+      if (last_register == 0b000) value = B; //here 000 after 0b represents last 3 bits from right(in lower nibble)
+      else if (last_register == 0b001) value = C;
+      else if (last_register == 0b010) value = D;
+      else if (last_register == 0b011) value = E;
+      else if (last_register == 0b100) value = H;
+      else if (last_register == 0b101) value = L;
+      else if (last_register == 0b111) value = A;
+      else if (last_register == 0b110) {
+        if (current_machine_cycle == 1) value = mem->read_memory(pair_registers(H,L)); //value at memory adress pointed by (HL)
+        else { 
+        current_machine_cycle++;
+        return 1;//memory accessing takes 1 machine cycle,returning that so timer can catch up
+        }
+      }
 
      //now lets assign value in designated register (ld r)
 
@@ -1446,7 +1541,19 @@ uint32_t execute_opcode () {
      else if (first_register == 0b011) E = value;
      else if (first_register == 0b100) H = value;
      else if (first_register == 0b101) L = value;
-     else if (first_register == 0b110) mem->write_memory(pair_registers(H,L),value);
+     else if (first_register == 0b110) {
+        if (current_machine_cycle == 1) mem->write_memory(pair_registers(H,L),value);
+        else {
+        current_machine_cycle++;
+        return 1; //memory accessing takes 1 machine cycle
+        }
+
+        //general return statememnt 
+
+        fetch_new_instruction = true;
+        return 1;
+
+     }
       //0b01110110 is already skipped as halt
       //also it translates to ld (hl) (hl) means write value stored by adress hl to adress hl,it does nothing anyways
       //thats why cpu uses this specific binary as halt
@@ -1454,9 +1561,8 @@ uint32_t execute_opcode () {
 
      //now we need to write machine cycles taken to execute this opcode as return statement
 
-        if (first_register == 0b110) return 2;  //ld (hl) r takes 2 machine cycles
-        else if (last_register == 0b110) return 2;  // ld r (hl) takes 2 machine cycles
-        else return 1; // ld r r' takes 1 machine cycle
+         fetch_new_instruction = true;
+         return 1; // ld r r' takes 1 machine cycle
 
 
      //this takes care of all ld r r' instructions
@@ -1469,7 +1575,14 @@ uint32_t execute_opcode () {
 
  else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00000111) == 0b00000110) {
     uint8_t reg = (opcode >> 3) & 0b00000111;//storing data of register 
-    uint8_t n = fetch_opcode();//getting value of n
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+    
+     else if (current_machine_cycle == 1) n = fetch_opcode();//getting value of n,condition is set so opcode fetchh
+      //only happens once,coz i want to prevent program counter incrementing
 
      if (reg == 0b000) B = n;
      else if (reg == 0b001) C = n;
@@ -1477,13 +1590,23 @@ uint32_t execute_opcode () {
      else if (reg == 0b011) E = n;
      else if (reg == 0b100) H = n;
      else if (reg == 0b101) L = n;
-     else if (reg == 0b110) mem->write_memory(pair_registers(H,L),n);
+     else if (reg == 0b110) {
+        if (current_machine_cycle == 2) mem->write_memory(pair_registers(H,L),n);
+        else {
+            current_machine_cycle++; //an extra condition is set in more than 1 opcode fetches to prevent 
+            // program counter false updates
+            return 1;
+        }
+      }
+
      else if (reg == 0b111) A = n;
 
+
      //return statements
-       
-     if (reg == 0b110) return 3; //ld (hl) n returns 3 machine cycle
-     else return 2; //ld r n takes 2 machine cycle to execute
+     fetch_new_instruction = true;
+     return 1;
+     //ld (hl) n returns 3 machine cycle
+     //ld r n takes 2 machine cycle to execute
 
  }
 
@@ -1492,32 +1615,72 @@ uint32_t execute_opcode () {
  //opcode : 0b00001010
 
  else if (opcode == 0b00001010) {
-    A = mem->read_memory(pair_registers(B,C));
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1)  {
+        A = mem->read_memory(pair_registers(B,C));
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ld a (de) : load a from memory adress pointed by de(1 byte cycle 2 machine cycle)
  //opcode : 0b00011010
 
  else if (opcode == 0b00011010) {
-    A = mem->read_memory(pair_registers(D,E));
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+   else if (current_machine_cycle == 1) {
+        A = mem->read_memory(pair_registers(D,E));
+        fetch_new_instruction = true;
+        return 1;
+   }
+
  }
 
  //ld (bc) a : load memory adress pointed by bc with value at a (1 byte cycle 2 machine cycle)
  //opcode : 0b00000010
 
  else if (opcode == 0b00000010) {
-    mem->write_memory(pair_registers(B,C),A);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        mem->write_memory(pair_registers(B,C),A);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ld (de) a : load memory adress pointed by de with value at a (1 byte cycle 2 machine cycle)
  //opcode : 0b00010010
 
  else if (opcode == 0b00010010) {
-    mem->write_memory(pair_registers(D,E),A);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        mem->write_memory(pair_registers(D,E),A);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ld a (nn) : load register a with value from adress specified by nn(3 byte cycle 4 machine cycle)
@@ -1525,22 +1688,63 @@ uint32_t execute_opcode () {
  //opcode : 0b11111010
  
  else if (opcode == 0b11111010) {
-    uint8_t n1 = fetch_opcode();//low byte (first n)
-    uint8_t n2 = fetch_opcode();//high byte (second n)
-    //n1 and n2 are immediate value (nn) = (n2 n1)
-    A = mem->read_memory(pair_registers(n2,n1)); //n1 and n2 are not registers but they will use same concept
-    //but in pair register (a,b) a is used as high byte as we will use n2 as highbyte so n2 first
-    return 4;
+
+        if (current_machine_cycle == 0) {  //first m cycle
+          current_machine_cycle++;
+          return 1;
+        }
+
+        else if (current_machine_cycle == 1) {  //second machine cycle
+          n1 = fetch_opcode();//low byte (first n)
+          current_machine_cycle++;
+          return 1;
+        }
+
+        else if (current_machine_cycle == 2) {   //third machine cycle
+          n2 = fetch_opcode();//high byte (second n)
+          current_machine_cycle++;
+          return 1;
+        }
+
+        else if (current_machine_cycle == 3) {   //fourth machine cycle
+          //n1 and n2 are immediate value (nn) = (n2 n1)
+          A = mem->read_memory(pair_registers(n2,n1)); //n1 and n2 are not registers but they will use same concept
+          //but in pair register (a,b) a is used as high byte as we will use n2 as highbyte so n2 first
+          fetch_new_instruction = true;
+          return 1;
+        }
+    
+
  }
 
  //ld (nn) a : load adress (nn) with data in a (3 byte cycle and 4 machine cycle)
  //opcode : 0b11101010
 
  else if (opcode == 0b11101010) {
-    uint8_t n1 = fetch_opcode();
-    uint8_t n2 = fetch_opcode();
-    mem->write_memory(pair_registers(n2,n1),A);
-    return 4;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        n1 = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
+    
+    else if (current_machine_cycle == 2) {
+        n2 = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 3) {
+        mem->write_memory(pair_registers(n2,n1),A);
+        fetch_new_instruction = true;
+        return 1;
+    }
+    
  }
 
  //ldh a (c) : load A with high memory adress specified by c,
@@ -1548,79 +1752,173 @@ uint32_t execute_opcode () {
  //opcode : 0b11110010               (2 machine cycle 1 byte cycle)
 
  else if (opcode == 0b11110010) {
-    A = mem->read_memory(0xFF00 + C); //just making sure memory stays in range of 0xFF00 - 0xFFFF
-    //as c is 8 bit int the result highbyte stays 0xFF
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        A = mem->read_memory(0xFF00 + C); //just making sure memory stays in range of 0xFF00 - 0xFFFF
+        //as c is 8 bit int the result highbyte stays 0xF
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ldh (c) a : load high memory adress c with a (1 byte cycle 2 machine cycle)
  //opcode : 0b11100010
 
  else if (opcode == 0b11100010) {
-    mem->write_memory(C+0xFF00,A);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        mem->write_memory(C+0xFF00,A);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ldh a (n) : load a with high memory (n) (2 byte cycle 3 machine cycle)
  //opcode = 0b11110000
 
  else if (opcode == 0b11110000) {
-    uint8_t n = fetch_opcode();
-    A = mem->read_memory(0xFF00+n);
-    return 3;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        n = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
+        A = mem->read_memory(0xFF00+n);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ldh (n) a : load high memory adress n with a (2 byte cycle 3 machine cycle)
  //opcode = 0b11100000
 
  else if (opcode == 0b11100000) {
-    uint8_t n = fetch_opcode();
-    mem->write_memory(0xFF00+n,A);
-    return 3;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        n = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
+        mem->write_memory(0xFF00+n,A);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ldh a (hl-) : load a with adress (hl),then decrement hl and store(1 byte cycle 2 machine cycle)
  //opcode : 0b00111010
 
  else if (opcode == 0b00111010) {
-    uint16_t hl = pair_registers(H,L);
-    A = mem->read_memory(hl);
-    hl--;
-    split_registers(H,L,hl);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        uint16_t hl = pair_registers(H,L);
+        A = mem->read_memory(hl);
+        hl--;
+        split_registers(H,L,hl);
+
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ld (hl-) a : load adress hl with a and then decrement hl and store (1 byte cycle 2 machine cycle)
  //opcode : 0b00110010
 
  else if (opcode == 0b00110010) {
-    uint16_t hl = pair_registers(H,L);
-    mem->write_memory(hl,A);
-    hl--;
-    split_registers(H,L,hl);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        uint16_t hl = pair_registers(H,L);
+        mem->write_memory(hl,A);
+        hl--;
+        split_registers(H,L,hl);
+
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ldh a (hl+) : load a with adress (hl),then increment hl and store(1 byte cycle 2 machine cycle)
  //opcode : 0b00101010
 
  else if (opcode == 0b00101010) {
-    uint16_t hl = pair_registers(H,L);
-    A = mem->read_memory(hl);
-    hl++;
-    split_registers(H,L,hl);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        uint16_t hl = pair_registers(H,L);
+        A = mem->read_memory(hl);
+        hl++;
+        split_registers(H,L,hl);
+
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ld (hl+) a : load adress hl with a and then increment hl and store (1 byte cycle 2 machine cycle)
  //opcode : 0b00100010
 
  else if (opcode == 0b00100010) {
-    uint16_t hl = pair_registers(H,L);
-    mem->write_memory(hl,A);
-    hl++;
-    split_registers(H,L,hl);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        uint16_t hl = pair_registers(H,L);
+        mem->write_memory(hl,A);
+        hl++;
+        split_registers(H,L,hl);
+
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ld opcodes : 16 bit load instructions :
@@ -1629,123 +1927,236 @@ uint32_t execute_opcode () {
  //opcode : 0b00xx0001
 
  else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00001111) == 0b00000001) {
-    uint8_t reg = (opcode >> 4) & 0b00000011; //storing data of register r
-    //now lets get nn
-    uint8_t lowbyte = fetch_opcode();//first n aka next opcode is actually lowbyte (cpu design)
-    uint8_t highbyte = fetch_opcode();
-    uint16_t nn = pair_registers(highbyte,lowbyte); //storing nn 
 
-    if (reg == 0b00) split_registers(B,C,nn);//split nn into b and c register
-    else if (reg == 0b01) split_registers(D,E,nn);
-    else if (reg == 0b10) split_registers(H,L,nn);
-    else if (reg == 0b11) SP = nn;  //storing 16 bit value in stack pointer
+    uint8_t reg = (opcode >> 4) & 0b00000011; //storing data of register r
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        //now lets get nn
+        lowbyte = fetch_opcode();//first n aka next opcode is actually lowbyte (cpu design)
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
+        highbyte = fetch_opcode();
+        uint16_t nn = pair_registers(highbyte,lowbyte); //storing nn 
+
+       if (reg == 0b00) split_registers(B,C,nn);//split nn into b and c register
+       else if (reg == 0b01) split_registers(D,E,nn);
+       else if (reg == 0b10) split_registers(H,L,nn);
+       else if (reg == 0b11) SP = nn;  //storing 16 bit value in stack pointer
+
+        fetch_new_instruction = true;
+        return 1;
+    }
     
-    return 3;
  }
 
  //ld (nn) sp : load adress (nn) with value from stack pointer (3 byte cycle , 5 machine cycle)
  //opcode : 0b00001000
 
  else if (opcode == 0b00001000) {
-    uint8_t lowbyte = fetch_opcode();//first n aka next opcode is actually lowbyte (cpu design)
-    uint8_t highbyte = fetch_opcode();
-    //we will split sp in two 8 bit int because memory cant store 16 bit data
-    uint16_t adress = pair_registers(highbyte,lowbyte);
-    mem->write_memory(adress,SP & 0x00FF);  //low byte in memory ,
-    adress++;
-    mem->write_memory(adress,((SP >> 8) & 0x00FF));  //high byte in memory ,
 
-    return 5;
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        lowbyte = fetch_opcode();//first n aka next opcode is actually lowbyte (cpu design)
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
+        highbyte = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 3) {
+        //we will split sp in two 8 bit int because memory cant store 16 bit data
+        uint16_t adress = pair_registers(highbyte,lowbyte);
+        mem->write_memory(adress,SP & 0x00FF);  //low byte in memory ,
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 4) {
+         uint16_t adress = pair_registers(highbyte,lowbyte);
+         adress++;
+         mem->write_memory(adress,((SP >> 8) & 0x00FF));  //high byte in memory ,
+
+        fetch_new_instruction = true;
+        return 1;
+    }
+   
  }
 
  //ld sp hl : load stack pointer with data from hl register (1 byte cycle , 2 machine cycle)
  //opcode : 0b11111001
 
  else if (opcode == 0b11111001) {
-    SP = pair_registers(H,L);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        SP = pair_registers(H,L);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //push rr : push to stack -> push data from 16 bit registers to memory adress pointed by sp
  //opcode : 0b11xx0101 (1 byte cycle 4 machine cycle) 
 
  else if ((opcode & 0b11000000) == 0b11000000 && (opcode & 0b00001111) == 0b00000101) {
-    SP--; //because we will write at memory ,sp had an adress from before so we move to next empty space
-    //we are using decrement because stack starts at higher adress and grows lower (cpu designers choice).
-    uint8_t rr = (opcode >> 4) & 0b00000011;
 
-    if (rr == 0b00) { // BC register
-    mem->write_memory(SP,B); //memory can store 1 byte at a adress as its 8 bit
-    SP--; // so we decrement sp again to go to next adjacent slot
-    mem->write_memory(SP,C); //and store 2nd register value there instead of pairing and storing
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
     }
 
-    else if (rr == 0b01) { //DE register
-    mem->write_memory(SP,D); 
-    SP--; 
-    mem->write_memory(SP,E); 
+    else if (current_machine_cycle == 1) {
+         SP--; //because we will write at memory ,sp had an adress from before so we move to next empty space
+        //we are using decrement because stack starts at higher adress and grows lower (cpu designers choice).
+        uint8_t rr = (opcode >> 4) & 0b00000011;
+
+       if (rr == 0b00) { // BC register
+         mem->write_memory(SP,B); //memory can store 1 byte at a adress as its 8 bit
+       }
+
+       else if (rr == 0b01) { //DE register
+         mem->write_memory(SP,D); 
+       }
+
+       else if (rr == 0b10) { //HL register
+         mem->write_memory(SP,H); 
+       }
+
+       else if (rr == 0b11) { //AF register
+         mem->write_memory(SP,A); 
+       }
+
+       current_machine_cycle++;
+       return 1;
     }
 
-    else if (rr == 0b10) { //HL register
-    mem->write_memory(SP,H); 
-    SP--; 
-    mem->write_memory(SP,L); 
+    else if (current_machine_cycle == 2) {
+        SP--; // so we decrement sp again to go to next adjacent slot
+        uint8_t rr = (opcode >> 4) & 0b00000011;
+
+        if (rr == 0b00) { // BC register
+          mem->write_memory(SP,C); //and store 2nd register value there instead of pairing and storing
+        }
+
+        else if (rr == 0b01) { //DE register
+          mem->write_memory(SP,E); 
+        }
+
+        else if (rr == 0b10) { //HL register
+          mem->write_memory(SP,L); 
+        }
+
+        else if (rr == 0b11) { //AF register
+          mem->write_memory(SP,F & 0xF0);  // we only need first 4 bit of flag,lower bit is masked to zero
+        }
+
+        current_machine_cycle++;
+        return 1;
+    }
+    //idle cycle :  in push rr , cpu takes one idle cycle wrapping things up,(hardware requirement)
+    else if (current_machine_cycle == 3) {
+        fetch_new_instruction = true;
+        return 1;
     }
 
-    else if (rr == 0b11) { //AF register
-    mem->write_memory(SP,A); 
-    SP--; 
-    mem->write_memory(SP,F & 0xF0);  // we only need first 4 bit of flag,lower bit is masked to zero
-    }
-
-    return 4;
  }
 
  //pop rr : pop from stack -> pop data from stack to 16 bit register (1 byte cycle 3 machine cycle)
  //opcode : 0b11xx0001
 
  else if ((opcode & 0b11000000) == 0b11000000 && (opcode & 0b00001111) == 0b00000001) {
-    uint8_t lowbyte = mem->read_memory(SP);
-    SP++;
-    uint8_t highbyte = mem->read_memory(SP);
-    SP++; //sp always points at next data to pop,so pop can be called again
 
-    uint16_t stack_data = pair_registers(highbyte,lowbyte);//pairing high and lowbyte
-    uint8_t rr = (opcode >> 4) & 0b00000011; //storing paired register data
-
-    if (rr == 0b00) split_registers(B,C,stack_data);
-    else if (rr == 0b01) split_registers(D,E,stack_data);
-    else if (rr == 0b10) split_registers(H,L,stack_data);
-    else if (rr == 0b11) {
-    split_registers(A,F,stack_data);
-    F &= 0xF0; //removing lower nibble as it needs to stay zero
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
     }
 
-    return 3;
+    else if (current_machine_cycle == 1) {
+        lowbyte = mem->read_memory(SP);
+        SP++;
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
+        highbyte = mem->read_memory(SP);
+        SP++; //sp always points at next data to pop,so pop can be called again
+
+        uint16_t stack_data = pair_registers(highbyte,lowbyte);//pairing high and lowbyte
+        uint8_t rr = (opcode >> 4) & 0b00000011; //storing paired register data
+
+        if (rr == 0b00) split_registers(B,C,stack_data);
+        else if (rr == 0b01) split_registers(D,E,stack_data);
+        else if (rr == 0b10) split_registers(H,L,stack_data);
+        else if (rr == 0b11) {
+        split_registers(A,F,stack_data);
+        F &= 0xF0; //removing lower nibble as it needs to stay zero
+        }
+
+        fetch_new_instruction = true;
+        return 1;
+    }
+    
  }
 
  //ld hl,sp+e : load hl with stackpointer value + e where e is immediate signed  int (not unsigned)
  //opcode : 0b11111000; (2 byte cycle,3 machine cycle)
 
  else if (opcode == 0b11111000) {
-    int8_t e = fetch_rawbyte();
-    uint32_t HL = SP + e;
-    //this operation sets flag 
-    //clears z and n flag and sets carry and half carry flag
-    set_flag('Z',0);
-    set_flag('N',0);
 
-    if ((SP & 0xF) + (e & 0xF) > 0xF) set_flag('H',1);
-    else set_flag('H',0);
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
 
-    if ((SP & 0xFF) + (e & 0xFF) > 0xFF) set_flag('C',1);
-    else set_flag('C',0);
+    else if (current_machine_cycle == 1) {
+        e = fetch_rawbyte();
+        current_machine_cycle++;
+        return 1;
+    }
 
-    uint16_t result = static_cast <uint16_t> (HL);
+    else if (current_machine_cycle == 2) {
+        uint32_t HL = SP + e;
+        //this operation sets flag 
+       //clears z and n flag and sets carry and half carry flag
+        set_flag('Z',0);
+        set_flag('N',0);
 
-    split_registers(H,L,result);
+        if ((SP & 0xF) + (e & 0xF) > 0xF) set_flag('H',1);
+        else set_flag('H',0);
 
-    return 3;
+        if ((SP & 0xFF) + (e & 0xFF) > 0xFF) set_flag('C',1);
+        else set_flag('C',0);
+
+        uint16_t result = static_cast <uint16_t> (HL);
+
+        split_registers(H,L,result);
+
+        fetch_new_instruction = true;
+        return 1;
+    }
+    
  }
 
  // ld operations end
@@ -1766,21 +2177,37 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_add(A,E);
      else if (r == 0b100) alu_add(A,H);
      else if (r == 0b101) alu_add(A,L);
-     else if (r == 0b110) alu_add_memory_adress(A,H,L);
+     else if (r == 0b110) {
+       if (current_machine_cycle == 1) alu_add_memory_adress(A,H,L);
+       else {
+        current_machine_cycle ++;
+        return 1;
+       }
+     }
      else if (r == 0b111) alu_add(A,A);
 
-      //return 
-       if (r == 0b110) return 2;
-       else return 1;
+        fetch_new_instruction = true;
+        return 1;
+       
  }
 
  //add n : add register a with immediate value n and store back in a(2 byte cycle 2 machine cycle)
  //opcode = 0b11000110
 
  else if (opcode == 0b11000110) {
-    uint8_t n = fetch_opcode();
-    alu_add (A,n);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+     current_machine_cycle++;
+     return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+     n = fetch_opcode();
+     alu_add (A,n);
+     fetch_new_instruction = true;
+     return 1;
+    }
+
  }
 
  //adc r : add a to register r with carry flag store back at a (1 byte cycle 1 machine cycle)
@@ -1795,21 +2222,37 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_add_carry(A,E);
      else if (r == 0b100) alu_add_carry(A,H);
      else if (r == 0b101) alu_add_carry(A,L);
-     else if (r == 0b110) alu_add_memory_adress_carry(A,H,L);
+     else if (r == 0b110) {
+       if (current_machine_cycle == 1) alu_add_memory_adress_carry(A,H,L);
+       else {
+        current_machine_cycle++;
+        return 1;
+       }
+     }
      else if (r == 0b111) alu_add_carry(A,A);
 
-      //return 
-       if (r == 0b110) return 2;
-       else return 1;
+        fetch_new_instruction = true;
+        return 1;
+       
  }
 
  //adc n : add immediate value n to a with carry flag (2 byte cycle,2 machine cycle)
  //opcode = 0b11001110
 
  else if (opcode == 0b11001110) {
-    uint8_t n = fetch_opcode();
-    alu_add_carry(A,n);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        n = fetch_opcode();
+        alu_add_carry(A,n);
+        fetch_new_instruction = true;
+        return 1;    
+    }
+
  }
 
  //subtract 
@@ -1826,12 +2269,17 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_sub(A,E);
      else if (r == 0b100) alu_sub(A,H);
      else if (r == 0b101) alu_sub(A,L);
-     else if (r == 0b110) alu_sub_memory_adress(A,H,L);
+     else if (r == 0b110) {
+       if (current_machine_cycle == 1) alu_sub_memory_adress(A,H,L);
+       else {
+        current_machine_cycle++;
+        return 1;
+       }
+     }
      else if (r == 0b111) alu_sub(A,A);
 
-      //return 
-       if (r == 0b110) return 2;
-       else return 1;
+        fetch_new_instruction = true;
+        return 1;
 
  }
 
@@ -1839,9 +2287,19 @@ uint32_t execute_opcode () {
  //opcode = 0b11010110
 
  else if (opcode == 0b11010110) {
-    uint8_t n = fetch_opcode();
-    alu_sub (A,n);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        n = fetch_opcode();
+        alu_sub (A,n);
+        fetch_new_instruction = true;
+        return 1;   
+    }
+
  }
 
  //sbc r : sub a to register r with carry flag store back at a (1 byte cycle 1 machine cycle)
@@ -1856,21 +2314,37 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_sub_carry(A,E);
      else if (r == 0b100) alu_sub_carry(A,H);
      else if (r == 0b101) alu_sub_carry(A,L);
-     else if (r == 0b110) alu_sub_memory_adress_carry(A,H,L);
+     else if (r == 0b110) {
+      if (current_machine_cycle == 1) alu_sub_memory_adress_carry(A,H,L);
+      else {
+        current_machine_cycle++;
+        return 1;
+      }
+     }
      else if (r == 0b111) alu_sub_carry(A,A);
 
-       //return 
-       if (r == 0b110) return 2;
-       else return 1;
+        fetch_new_instruction = true;
+        return 1;
+
  }
 
  //sbc n : sub immediate value n to a with carry flag (2 byte cycle,2 machine cycle)
  //opcode = 0b11011110
 
  else if (opcode == 0b11011110) {
-    uint8_t n = fetch_opcode();
-    alu_sub_carry(A,n);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        n = fetch_opcode();
+        alu_sub_carry(A,n);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //comparisions : 
@@ -1887,21 +2361,37 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_compare_reg(A,E);
      else if (r == 0b100) alu_compare_reg(A,H);
      else if (r == 0b101) alu_compare_reg(A,L);
-     else if (r == 0b110) alu_compare_reg_memory_adress(A,H,L);
+     else if (r == 0b110) {
+       if (current_machine_cycle == 1) alu_compare_reg_memory_adress(A,H,L);
+       else {
+        current_machine_cycle++;
+        return 1;
+       }
+     }
      else if (r == 0b111) alu_compare_reg(A,A);
 
-       //return 
-       if (r == 0b110) return 2;
-       else return 1;
+        fetch_new_instruction = true;
+        return 1;
+
  }
 
  //cp n : sub a immediate value n to a with carry flag dont update result change flags(2 byte cycle,2 machine cycle)
  //opcode = 0b11111110
 
  else if (opcode == 0b11111110) {
-    uint8_t n = fetch_opcode();
-    alu_compare_reg(A,n);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        n = fetch_opcode();
+        alu_compare_reg(A,n);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //increment : inc r -> increment register and store back (1 byte cycle 1 machine cycle)
@@ -1916,12 +2406,31 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_inc_reg(E);
      else if (r == 0b100) alu_inc_reg(H);
      else if (r == 0b101) alu_inc_reg(L);
-     else if (r == 0b110) alu_inc_memory(H,L);
+     else if (r == 0b110) {
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+      }
+
+      else if (current_machine_cycle == 1) {
+        alu_inc_memory(H,L);
+        current_machine_cycle++;
+        return 1;
+       }
+
+       else if (current_machine_cycle == 2) {
+        
+        alu_inc_memory(H,L);
+
+       }
+
+     }
      else if (r == 0b111) alu_inc_reg(A);
 
-      //return 
-       if (r == 0b110) return 3;  //inc (hl) takes 3 machine cycle
-       else return 1;
+        fetch_new_instruction = true;
+        return 1; //last cycle will be idle cycle as inc hl takes 3 cycle
+
  }
 
   //decrement : dec r -> decrement register and store back (1 byte cycle 1 machine cycle)
@@ -1936,12 +2445,31 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_dec_reg(E);
      else if (r == 0b100) alu_dec_reg(H);
      else if (r == 0b101) alu_dec_reg(L);
-     else if (r == 0b110) alu_dec_memory(H,L);
-     else if (r == 0b111) alu_dec_reg(A);
+     else if (r == 0b110)  {
 
-      //return 
-       if (r == 0b110) return 3;  //inc (hl) takes 3 machine cycle
-       else return 1;
+      if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+      }
+
+      else if (current_machine_cycle == 1) {
+        alu_dec_memory(H,L);
+        current_machine_cycle++;
+        return 1;
+       }
+
+       else if (current_machine_cycle == 2) {
+        
+        alu_dec_memory(H,L);
+
+       }
+
+     }
+     else if (r == 0b111) alu_dec_reg(A);
+  
+        fetch_new_instruction = true;
+        return 1;
+
  }
 
  // logical operations :
@@ -1958,21 +2486,37 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_and(A,E);
      else if (r == 0b100) alu_and(A,H);
      else if (r == 0b101) alu_and(A,L);
-     else if (r == 0b110) alu_and_memory_adress(A,H,L);
+     else if (r == 0b110) {
+       if (current_machine_cycle == 1) alu_and_memory_adress(A,H,L);
+       else {
+        current_machine_cycle++;
+        return 1;
+       }
+     }
      else if (r == 0b111) alu_and(A,A);
 
-      //return 
-       if (r == 0b110) return 2; 
-       else return 1;
+        fetch_new_instruction = true;
+        return 1;
+       
  }
 
  //and n : and a immediate value n to a (2 byte cycle,2 machine cycle)
  //opcode = 0b11100110
 
  else if (opcode == 0b11100110) {
-    uint8_t n = fetch_opcode();
-    alu_and(A,n);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        n = fetch_opcode();
+        alu_and(A,n);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //or r : perform bitwise or on a with r and store in a (1 byte cycle,1 machine cycle)
@@ -1987,21 +2531,37 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_or(A,E);
      else if (r == 0b100) alu_or(A,H);
      else if (r == 0b101) alu_or(A,L);
-     else if (r == 0b110) alu_or_memory_adress(A,H,L);
+     else if (r == 0b110) {
+      if (current_machine_cycle == 1) alu_or_memory_adress(A,H,L);
+      else {
+        current_machine_cycle++;
+        return 1;
+      }
+     }
      else if (r == 0b111) alu_or(A,A);
-
-      //return 
-       if (r == 0b110) return 2; 
-       else return 1;
+   
+        fetch_new_instruction = true;
+        return 1;
+       
  }
 
  //or n : or a immediate value n to a (2 byte cycle,2 machine cycle)
  //opcode = 0b11110110
 
  else if (opcode == 0b11110110) {
-    uint8_t n = fetch_opcode();
-    alu_or(A,n);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        n = fetch_opcode();
+        alu_or(A,n);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //xor r : perform bitwise xor on a with r and store in a (1 byte cycle,1 machine cycle)
@@ -2016,21 +2576,37 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_xor(A,E);
      else if (r == 0b100) alu_xor(A,H);
      else if (r == 0b101) alu_xor(A,L);
-     else if (r == 0b110) alu_xor_memory_adress(A,H,L);
+     else if (r == 0b110) {
+       if (current_machine_cycle == 1) alu_xor_memory_adress(A,H,L);
+       else {
+        current_machine_cycle++;
+        return 1;
+       }
+     }
      else if (r == 0b111) alu_xor(A,A);
 
-      //return 
-       if (r == 0b110) return 2; 
-       else return 1;
+        fetch_new_instruction = true;
+        return 1;
+
  }
 
  //xor n : xor a immediate value n to a (2 byte cycle,2 machine cycle)
  //opcode = 0b11101110
 
  else if (opcode == 0b11101110) {
-    uint8_t n = fetch_opcode();
-    alu_xor(A,n);
-    return 2;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        n = fetch_opcode();
+        alu_xor(A,n);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //special instructions :
@@ -2040,6 +2616,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b00111111) {
     alu_complement_carry_flag();
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2048,6 +2625,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b00110111) {
     alu_set_carry_flag();
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2057,6 +2635,7 @@ uint32_t execute_opcode () {
  else if (opcode == 0b00100111) {
     alu_daa(A); // we will only apply daa for a register as it has a fixed opcode and it only applies on
     //a register where the result of a operation is stored mostly
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2065,6 +2644,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b00101111) {
     alu_complement_reg(A);
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2076,12 +2656,21 @@ uint32_t execute_opcode () {
  else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00001111) == 0b00000011) {
     uint8_t rr = (opcode >> 4) & 0b00000011;
 
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    } 
+    
+    else if (current_machine_cycle == 1) {
+
      if (rr == 0b00) alu_inc_paired_reg(B,C);
      else if (rr == 0b01) alu_inc_paired_reg(D,E);
      else if (rr == 0b10) alu_inc_paired_reg(H,L);
      else if (rr == 0b11) SP++;
 
-     return 2;
+     fetch_new_instruction = true;
+     return 1;
+    }
  }
 
  // dec rr (1 byte cycle 2 machine cycle)
@@ -2090,12 +2679,22 @@ uint32_t execute_opcode () {
  else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00001111) == 0b00001011) {
     uint8_t rr = (opcode >> 4) & 0b00000011;
 
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+
      if (rr == 0b00) alu_dec_paired_reg(B,C);
      else if (rr == 0b01) alu_dec_paired_reg(D,E);
      else if (rr == 0b10) alu_dec_paired_reg(H,L);
      else if (rr == 0b11) SP--;
 
-     return 2;
+     fetch_new_instruction = true;
+     return 1;
+    }
+
  }
 
  // add hl,rr : add rr to hl and store result back into hl (1 byte cycle,2 machine cycle)
@@ -2104,30 +2703,60 @@ uint32_t execute_opcode () {
  else if ((opcode & 0b11000000) == 0b00000000 && (opcode & 0b00001111) == 0b00001001) {
     uint8_t rr = (opcode >> 4) & 0b00000011;
 
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+
      if (rr == 0b00) alu_add_paired_reg(H,L,B,C);
      else if (rr == 0b01) alu_add_paired_reg(H,L,D,E);
      else if (rr == 0b10) alu_add_paired_reg(H,L,H,L);
      else if (rr == 0b11) alu_add_paired_reg(H,L,SP);
 
-     return 2;
+     fetch_new_instruction = true;
+     return 1;
+    }
+
  }
 
  // add sp,e : add sp to signed int e from next opcode (2 byte cycle,4 machine cycle)
  //opcode : 0b11101000
 
  else if (opcode == 0b11101000) {
-    int8_t e = fetch_rawbyte();
 
-    set_flag ('Z',0);
-    set_flag ('N',0);
-    if ((SP & 0x0F) + (e & 0x0F) > 0x0F) set_flag('H',1);
-    else set_flag('H',0);
-    if ((SP & 0xFF) + (e & 0xFF) > 0xFF) set_flag('C',1);
-    else set_flag('C',0);
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
 
-    SP += e;
+    else if (current_machine_cycle == 1) {
+        e = fetch_rawbyte();
+        current_machine_cycle++;
+        return 1;
+    }
 
-    return 4;
+    else if (current_machine_cycle == 2) {
+
+        set_flag ('Z',0);
+        set_flag ('N',0);
+        if ((SP & 0x0F) + (e & 0x0F) > 0x0F) set_flag('H',1);
+        else set_flag('H',0);
+        if ((SP & 0xFF) + (e & 0xFF) > 0xFF) set_flag('C',1);
+        else set_flag('C',0);
+
+        current_machine_cycle++;
+        return 1;
+
+    }
+
+    else if (current_machine_cycle == 3) {
+        SP += e;
+        fetch_new_instruction = true;
+        return 1;
+    }
+    
  }
 
  //rotate,shift and swap operations : 
@@ -2138,6 +2767,7 @@ uint32_t execute_opcode () {
  else if (opcode == 0b00000111) {
     alu_rotate_left_circular(A);
     set_flag('Z',0);
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2147,6 +2777,7 @@ uint32_t execute_opcode () {
  else if (opcode == 0b00001111) {
     alu_rotate_right_circular(A);
     set_flag('Z',0);
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2156,6 +2787,7 @@ uint32_t execute_opcode () {
  else if (opcode == 0b00010111) {
     alu_rotate_left_carry(A);
     set_flag('Z',0);
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2165,6 +2797,7 @@ uint32_t execute_opcode () {
  else if (opcode == 0b00011111) {
     alu_rotate_right_carry(A);
     set_flag('Z',0);
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2173,7 +2806,14 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0xCB) {
 
-  uint8_t cb_opcode = fetch_opcode();
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+     cb_opcode = fetch_opcode();
+    }
 
     //RLC r : rotates 8 bit register r value to left in circular manner (2 byte cycle,2 mqchine cycle) 
    //opcode : 0xCB >> 0b00000xxx 
@@ -2188,12 +2828,27 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_rotate_left_circular(E);
      else if (r == 0b100) alu_rotate_left_circular(H);
      else if (r == 0b101) alu_rotate_left_circular(L);
-     else if (r == 0b110) alu_rotate_left_circular_memory_adress(H,L);
+     else if (r == 0b110) {
+
+        if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+        }
+
+        else if (current_machine_cycle == 2) {
+        alu_rotate_left_circular_memory_adress(H,L); //thhis only calls read mempory part
+        current_machine_cycle++;
+        return 1;
+        }
+
+        else if (current_machine_cycle == 3) alu_rotate_left_circular_memory_adress(H,L); //this calls for the calculation and write mem
+
+     }
      else if (r == 0b111) alu_rotate_left_circular(A);
 
-      //return 
-       if (r == 0b110) return 4; 
-       else return 2;
+      fetch_new_instruction = true;
+      return 1;
+
     }
 
     //RRC r : rotates 8 bit register r value to right in circular manner (2 byte cycle,2 mqchine cycle) 
@@ -2209,12 +2864,27 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_rotate_right_circular(E);
      else if (r == 0b100) alu_rotate_right_circular(H);
      else if (r == 0b101) alu_rotate_right_circular(L);
-     else if (r == 0b110) alu_rotate_right_circular_memory_adress(H,L);
+     else if (r == 0b110) {
+
+        if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+        }
+
+        else if (current_machine_cycle == 2) {
+        alu_rotate_right_circular_memory_adress(H,L); //thhis only calls read mempory part
+        current_machine_cycle++;
+        return 1;
+        }
+
+        else if (current_machine_cycle == 3) alu_rotate_right_circular_memory_adress(H,L);
+
+     }
      else if (r == 0b111) alu_rotate_right_circular(A);
 
-      //return 
-       if (r == 0b110) return 4; 
-       else return 2;
+     fetch_new_instruction = true;
+     return 1;
+
     }
 
     //RL r : rotates 8 bit register r value to left with carry flag (2 byte cycle,2 mqchine cycle) 
@@ -2230,12 +2900,26 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_rotate_left_carry(E);
      else if (r == 0b100) alu_rotate_left_carry(H);
      else if (r == 0b101) alu_rotate_left_carry(L);
-     else if (r == 0b110) alu_rotate_left_carry_memory_adress(H,L);
+     else if (r == 0b110) {
+
+        if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+        }
+
+        else if (current_machine_cycle == 2) {
+        alu_rotate_left_carry_memory_adress(H,L); //thhis only calls read mempory part
+        current_machine_cycle++;
+        return 1;
+        }
+
+        else if (current_machine_cycle == 3) alu_rotate_left_carry_memory_adress(H,L);
+
+     }
      else if (r == 0b111) alu_rotate_left_carry(A);
 
-      //return 
-       if (r == 0b110) return 4; 
-       else return 2;
+      fetch_new_instruction = true;
+      return 1;
     }
 
     //RR r : rotates 8 bit register r value to right with carry flag (2 byte cycle,2 mqchine cycle) 
@@ -2251,12 +2935,26 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_rotate_right_carry(E);
      else if (r == 0b100) alu_rotate_right_carry(H);
      else if (r == 0b101) alu_rotate_right_carry(L);
-     else if (r == 0b110) alu_rotate_right_carry_memory_adress(H,L);
+     else if (r == 0b110) {
+
+        if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+        }
+
+        else if (current_machine_cycle == 2) {
+        alu_rotate_right_carry_memory_adress(H,L); //thhis only calls read mempory part
+        current_machine_cycle++;
+        return 1;
+        }
+
+        else if (current_machine_cycle == 3) alu_rotate_right_carry_memory_adress(H,L);
+
+     } 
      else if (r == 0b111) alu_rotate_right_carry(A);
 
-      //return 
-       if (r == 0b110) return 4; 
-       else return 2;
+      fetch_new_instruction = true;
+      return 1;
     }
 
     //sla r : shifts the 8 bit register by 1 left (2 byte cycle,2 machine cycle)
@@ -2272,12 +2970,26 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_shift_left(E);
      else if (r == 0b100) alu_shift_left(H);
      else if (r == 0b101) alu_shift_left(L);
-     else if (r == 0b110) alu_shift_left_memory_adress(H,L);
+     else if (r == 0b110) {
+
+        if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+        }
+
+        else if (current_machine_cycle == 2) {
+        alu_shift_left_memory_adress(H,L); //thhis only calls read mempory part
+        current_machine_cycle++;
+        return 1;
+        }
+
+        else if (current_machine_cycle == 3) alu_shift_left_memory_adress(H,L);
+
+     }
      else if (r == 0b111) alu_shift_left(A);
 
-      //return 
-       if (r == 0b110) return 4; 
-       else return 2;
+     fetch_new_instruction = true;
+     return 1;
     }
 
     //sra r : shifts the 8 bit register by 1 right (2 byte cycle,2 machine cycle)
@@ -2293,12 +3005,26 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_shift_right(E);
      else if (r == 0b100) alu_shift_right(H);
      else if (r == 0b101) alu_shift_right(L);
-     else if (r == 0b110) alu_shift_right_memory_adress(H,L);
+     else if (r == 0b110) {
+
+        if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+        }
+
+        else if (current_machine_cycle == 2) {
+        alu_shift_right_memory_adress(H,L); //thhis only calls read mempory part
+        current_machine_cycle++;
+        return 1;
+        }
+
+        else if (current_machine_cycle == 3) alu_shift_right_memory_adress(H,L);
+
+     }
      else if (r == 0b111) alu_shift_right(A);
 
-      //return 
-       if (r == 0b110) return 4; 
-       else return 2;
+     fetch_new_instruction = true;
+     return 1;
     }
 
     //sla r : shifts the 8 bit register by 1 right logical (2 byte cycle,2 machine cycle)
@@ -2314,12 +3040,26 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_shift_right_logical(E);
      else if (r == 0b100) alu_shift_right_logical(H);
      else if (r == 0b101) alu_shift_right_logical(L);
-     else if (r == 0b110) alu_shift_right_logical_memory_adress(H,L);
+     else if (r == 0b110) {
+
+        if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+        }
+
+        else if (current_machine_cycle == 2) {
+        alu_shift_right_logical_memory_adress(H,L); //thhis only calls read mempory part
+        current_machine_cycle++;
+        return 1;
+        }
+
+        else if (current_machine_cycle == 3) alu_shift_right_logical_memory_adress(H,L);
+
+     } 
      else if (r == 0b111) alu_shift_right_logical(A);
 
-      //return 
-       if (r == 0b110) return 4; 
-       else return 2;
+      fetch_new_instruction = true;
+      return 1;
     }
 
     // swap r : swap the upper and lower nibble in register (2 byte cycle,2 machine cycle)
@@ -2334,12 +3074,26 @@ uint32_t execute_opcode () {
      else if (r == 0b011) alu_swap(E);
      else if (r == 0b100) alu_swap(H);
      else if (r == 0b101) alu_swap(L);
-     else if (r == 0b110) alu_swap_memory(H,L);
+     else if (r == 0b110) {
+
+        if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+        }
+
+        else if (current_machine_cycle == 2) {
+        alu_swap_memory(H,L); //thhis only calls read mempory part
+        current_machine_cycle++;
+        return 1;
+        }
+
+        else if (current_machine_cycle == 3) alu_swap_memory(H,L);
+
+     }
      else if (r == 0b111) alu_swap(A);
 
-      //return 
-       if (r == 0b110) return 4; 
-       else return 2;
+      fetch_new_instruction = true;
+      return 1;
     }
 
     //BIT b,r : test bit register 
@@ -2353,16 +3107,45 @@ uint32_t execute_opcode () {
         uint8_t r = cb_opcode & 0b00000111;
 
         uint8_t* reg_pointer = nullptr;
-        uint8_t value = 0;
 
-        if (r == 0b110)  value = mem->read_memory(pair_registers(H,L));  //stores value of paired hl for future
+    if (r==0b110) {
+
+         if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+         }
+
+         else if (current_machine_cycle == 2) {
+          n = mem->read_memory(pair_registers(H,L));
+
+          reg_pointer = &n;//n is a 8 bit int that we get by reading mem earlier
+
+             if (bit == 0b000) alu_test_bit(*reg_pointer,0b00000001);
+             else if (bit == 0b001) alu_test_bit(*reg_pointer,0b00000010);
+             else if (bit == 0b010) alu_test_bit(*reg_pointer,0b00000100);
+             else if (bit == 0b011) alu_test_bit(*reg_pointer,0b00001000);
+             else if (bit == 0b100) alu_test_bit(*reg_pointer,0b00010000);
+             else if (bit == 0b101) alu_test_bit(*reg_pointer,0b00100000);
+             else if (bit == 0b110) alu_test_bit(*reg_pointer,0b01000000);
+             else if (bit == 0b111) alu_test_bit(*reg_pointer,0b10000000);
+
+             fetch_new_instruction = true;
+             return 1;
+          
+          }
+
+          
+    }
+
+    else {
+
       if (r == 0b000) reg_pointer = &B;
       else if (r == 0b001) reg_pointer = &C;
       else if (r == 0b010) reg_pointer = &D;
       else if (r == 0b011) reg_pointer = &E;
       else if (r == 0b100) reg_pointer = &H;
       else if (r == 0b101) reg_pointer = &L;
-      else if (r == 0b110) reg_pointer = &value;
+      // r == 110 has been taken care of above
       else if (r == 0b111) reg_pointer = &A;
 
       if (bit == 0b000) alu_test_bit(*reg_pointer,0b00000001);
@@ -2374,12 +3157,12 @@ uint32_t execute_opcode () {
       else if (bit == 0b110) alu_test_bit(*reg_pointer,0b01000000);
       else if (bit == 0b111) alu_test_bit(*reg_pointer,0b10000000);
 
-      //return 
-       if (r == 0b110)  return 3;
-       else return 2;
+      fetch_new_instruction = true;
+      return 1;
     }
-    
-       
+
+    }
+
 
     //res b,r : reset bit register 
     //resets the bit b  of a register r , (2 byte cycle,2 machine cycle)
@@ -2391,8 +3174,40 @@ uint32_t execute_opcode () {
 
         uint8_t* reg_pointer = nullptr; // reg pointer
 
-         uint8_t value = 0;
-         if (r==0b110) value = mem->read_memory(pair_registers(H,L)); //read from memory and store value for memory operation
+    if (r==0b110) {
+
+         if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+         }
+
+         else if (current_machine_cycle == 2) {
+          n = mem->read_memory(pair_registers(H,L));
+          current_machine_cycle++;
+          return 1;
+          }
+
+          else if (current_machine_cycle == 3) {
+            reg_pointer = &n;
+
+             if (bit == 0b000) alu_reset_bit(*reg_pointer,0b00000001);
+             else if (bit == 0b001) alu_reset_bit(*reg_pointer,0b00000010);
+             else if (bit == 0b010) alu_reset_bit(*reg_pointer,0b00000100);
+             else if (bit == 0b011) alu_reset_bit(*reg_pointer,0b00001000);
+             else if (bit == 0b100) alu_reset_bit(*reg_pointer,0b00010000);
+             else if (bit == 0b101) alu_reset_bit(*reg_pointer,0b00100000);
+             else if (bit == 0b110) alu_reset_bit(*reg_pointer,0b01000000);
+             else if (bit == 0b111) alu_reset_bit(*reg_pointer,0b10000000);
+
+             mem->write_memory(pair_registers(H,L),n); //for memory operations write back
+
+             fetch_new_instruction = true;
+             return 1;
+          }
+
+    }
+
+    else {
 
       if (r == 0b000) reg_pointer = &B;
       else if (r == 0b001) reg_pointer = &C;
@@ -2400,7 +3215,7 @@ uint32_t execute_opcode () {
       else if (r == 0b011) reg_pointer = &E;
       else if (r == 0b100) reg_pointer = &H;
       else if (r == 0b101) reg_pointer = &L;
-      else if (r == 0b110) reg_pointer = &value;
+      // r == 110 has been taken care of above
       else if (r == 0b111) reg_pointer = &A;
 
       if (bit == 0b000) alu_reset_bit(*reg_pointer,0b00000001);
@@ -2412,12 +3227,10 @@ uint32_t execute_opcode () {
       else if (bit == 0b110) alu_reset_bit(*reg_pointer,0b01000000);
       else if (bit == 0b111) alu_reset_bit(*reg_pointer,0b10000000);
 
-      //return 
-       if (r == 0b110) {
-        mem->write_memory(pair_registers(H,L),value); //for memory operations write back
-        return 4;
-       }
-       else return 2;
+      fetch_new_instruction = true;
+      return 1;
+    }
+
     }
 
     //set b,r : sets bit register 
@@ -2429,10 +3242,41 @@ uint32_t execute_opcode () {
         uint8_t r = cb_opcode & 0b00000111;
 
         uint8_t* reg_pointer = nullptr; // reg pointer
-     
-         uint8_t value = 0;
-         if (r==0b110) value = mem->read_memory(pair_registers(H,L)); //read from memory and store value for memory operation
 
+        if (r==0b110) {
+
+         if (current_machine_cycle == 1) {
+            current_machine_cycle++;
+            return 1;
+         }
+
+         else if (current_machine_cycle == 2) {
+          n = mem->read_memory(pair_registers(H,L));
+          current_machine_cycle++;
+          return 1;
+          }
+
+          else if (current_machine_cycle == 3) {
+            reg_pointer = &n;
+
+             if (bit == 0b000) alu_set_bit(*reg_pointer,0b00000001);
+             else if (bit == 0b001) alu_set_bit(*reg_pointer,0b00000010);
+             else if (bit == 0b010) alu_set_bit(*reg_pointer,0b00000100);
+             else if (bit == 0b011) alu_set_bit(*reg_pointer,0b00001000);
+             else if (bit == 0b100) alu_set_bit(*reg_pointer,0b00010000);
+             else if (bit == 0b101) alu_set_bit(*reg_pointer,0b00100000);
+             else if (bit == 0b110) alu_set_bit(*reg_pointer,0b01000000);
+             else if (bit == 0b111) alu_set_bit(*reg_pointer,0b10000000);
+
+             mem->write_memory(pair_registers(H,L),n); //for memory operations write back
+
+             fetch_new_instruction = true;
+             return 1;
+          }
+
+    }
+
+    else {
 
       if (r == 0b000) reg_pointer = &B;
       else if (r == 0b001) reg_pointer = &C;
@@ -2440,7 +3284,7 @@ uint32_t execute_opcode () {
       else if (r == 0b011) reg_pointer = &E;
       else if (r == 0b100) reg_pointer = &H;
       else if (r == 0b101) reg_pointer = &L;
-      else if (r == 0b110) reg_pointer = &value;
+      // r == 110 has been taken care of above
       else if (r == 0b111) reg_pointer = &A;
 
       if (bit == 0b000) alu_set_bit(*reg_pointer,0b00000001);
@@ -2452,12 +3296,11 @@ uint32_t execute_opcode () {
       else if (bit == 0b110) alu_set_bit(*reg_pointer,0b01000000);
       else if (bit == 0b111) alu_set_bit(*reg_pointer,0b10000000);
 
-      //return 
-       if (r == 0b110) {
-        mem->write_memory(pair_registers(H,L),value); //for memory operations write back
-        return 4;
-       }
-       else return 2;
+      fetch_new_instruction = true;
+      return 1;
+    }
+     
+     
     }
 
   return 0;
@@ -2472,12 +3315,30 @@ uint32_t execute_opcode () {
  //opcode : 0b11000011    (3 byte cycle,4 machine cycle)
 
  else if (opcode == 0b11000011) {
-    uint8_t lowbyte = fetch_opcode();
-    uint8_t highbyte = fetch_opcode();
 
-    PC = pair_registers(highbyte,lowbyte);
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
 
-    return 4;
+    else if (current_machine_cycle == 1) {
+        lowbyte = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
+        highbyte = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 3) {
+        PC = pair_registers(highbyte,lowbyte);
+        fetch_new_instruction = true;
+        return 1;
+    }
+    
  }
 
  //jp HL : unconditional jump to adress specified by HL (1 byte cycle,1 machine cycle)
@@ -2485,6 +3346,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b11101001) {
     PC = pair_registers(H,L);
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2497,52 +3359,83 @@ uint32_t execute_opcode () {
     bool z_flag = get_flag('Z');
     bool C_flag = get_flag('C');
 
-    uint8_t lowbyte = fetch_opcode();
-    uint8_t highbyte = fetch_opcode();
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
 
-    uint8_t cc = (opcode >> 3) & 0b00000011;
+    else if (current_machine_cycle == 1) {
+        lowbyte = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
+        highbyte = fetch_opcode();
+
+        uint8_t cc = (opcode >> 3) & 0b00000011;
 
     if (cc == 0b00) { //NZ = not zero
-         if (!z_flag) {
-            PC = pair_registers(highbyte,lowbyte);
-            return 4;
-         }
-         else return 3;
+
+        if (!z_flag) current_machine_cycle++;
+        else fetch_new_instruction = true;
+
     }
 
     else if (cc == 0b01) { //Z = zero
-        if (z_flag) {
-             PC = pair_registers(highbyte,lowbyte);
-            return 4;
-        }
-        else return 3;
+
+        if (z_flag)  current_machine_cycle++;
+        else fetch_new_instruction = true;
+
     }
 
     else if (cc == 0b10) { //NC = not carry
-        if (!C_flag) {
-             PC = pair_registers(highbyte,lowbyte);
-            return 4;
-        }
-        else return 3;
+
+        if (!C_flag) current_machine_cycle++;
+        else fetch_new_instruction = true;
     }
 
     else if (cc == 0b11) { //C = carry
-        if (C_flag) {
-             PC = pair_registers(highbyte,lowbyte);
-            return 4;
-        }
-        else return 3;
+        if (C_flag) current_machine_cycle++;
+        else fetch_new_instruction = true;
     }
-    return 3; //just fr safety 
+
+    return 1;
+       
+    }
+
+    else if (current_machine_cycle == 3) {
+
+         PC = pair_registers(highbyte,lowbyte);
+         fetch_new_instruction = true;
+         return 1;
+    }
+
+
  }
 
  //JR e : jump to the relative adress specified by 8 bit signed operand e (2 byte cycle,3 machine cycle)
  //opcode = 0b00011000
 
  else if (opcode == 0b00011000) {
-    int8_t e = fetch_rawbyte ();
-    PC += e;
-    return 3;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        e = fetch_rawbyte ();
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
+        PC += e;
+        fetch_new_instruction = true;
+        return 1;
+    }
+    
  }
 
  //jr cc e : jump to the relativve adress specified by 8 bit operand e depending on cc
@@ -2552,59 +3445,94 @@ uint32_t execute_opcode () {
     bool z_flag = get_flag('Z');
     bool C_flag = get_flag('C');
 
-    int8_t e = fetch_rawbyte();
-
-    uint8_t cc = (opcode >> 3) & 0b00000011;
-
-    if (cc == 0b00) { //NZ = not zero
-         if (!z_flag) {
-            PC += e;
-            return 3;
-         }
-         else return 2;
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
     }
 
-    else if (cc == 0b01) { //Z = zero
-        if (z_flag) {
-              PC += e;
-              return 3;
+    else if (current_machine_cycle == 1) {
+        e = fetch_rawbyte();
+        uint8_t cc = (opcode >> 3) & 0b00000011;
+
+        if (cc == 0b00) { //NZ = not zero
+         if (!z_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;;
         }
-        else return 2;
+
+        else if (cc == 0b01) { //Z = zero
+         if (z_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
+        }
+
+        else if (cc == 0b10) { //NC = not carry
+         if (!C_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
+        } 
+
+        else if (cc == 0b11) { //C = carry
+         if (C_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
+        }
+
+        return 1;
+     }
+
+    else if (current_machine_cycle == 2) {
+
+        PC += e;
+        fetch_new_instruction = true;
+        return 1;
     }
 
-    else if (cc == 0b10) { //NC = not carry
-        if (!C_flag) {
-              PC += e;
-              return 3;
-        }
-        else return 2;
+    
     }
 
-    else if (cc == 0b11) { //C = carry
-        if (C_flag) {
-              PC += e;
-              return 3;
-        }
-        else return 2;
-    }
-    return 2; //just fr safety 
- }
 
  //call nn : call function -> unconditional function call to the absolute adress specified by nn
  //opcode : 0b11001101           (3 byte cycle,6 machine cycle)
 
  else if (opcode == 0b11001101) {
-    uint8_t lowbyte = fetch_opcode();
-    uint8_t highbyte = fetch_opcode();
 
-    SP--; //move to next empty space in stack pointer
-    mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
-    SP--; //stack grows downward
-    mem->write_memory (SP,PC & 0xFF);
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
 
-    PC = pair_registers(highbyte,lowbyte);
+    else if (current_machine_cycle == 1) {
+        lowbyte = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
 
-    return 6;
+    else if (current_machine_cycle == 2) {
+        highbyte = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 3) {
+        //cpu does internal operations here and prepares stack
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 4) {
+        SP--; //move to next empty space in stack pointer
+        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 5) {
+        SP--; //stack grows downward
+        mem->write_memory (SP,PC & 0xFF);
+
+        PC = pair_registers(highbyte,lowbyte);
+
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //call cc,nn : conditional call (3 byte cycle,(6 machine cycle if cc true or 3 machine cycle if cc false))
@@ -2614,73 +3542,99 @@ uint32_t execute_opcode () {
     bool z_flag = get_flag('Z');
     bool C_flag = get_flag('C');
 
-    uint8_t lowbyte = fetch_opcode();
-    uint8_t highbyte = fetch_opcode();
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
 
-    uint8_t cc = (opcode >> 3) & 0b00000011;
+    else if (current_machine_cycle == 1) {
+        lowbyte = fetch_opcode();
+        current_machine_cycle++;
+        return 1;
+    }
 
-    if (cc == 0b00) { //NZ = not zero
-         if (!z_flag) {
-        SP--; //move to next empty space in stack pointer
-        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
-        SP--; //stack grows downward
-        mem->write_memory (SP,PC & 0xFF);
-        PC = pair_registers(highbyte,lowbyte);
-        return 6;
-        }
-         else return 3;
+    else if (current_machine_cycle == 2) {
+        highbyte = fetch_opcode();
+        uint8_t cc = (opcode >> 3) & 0b00000011;
+
+        if (cc == 0b00) { //NZ = not zero
+         if (!z_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
     }
 
     else if (cc == 0b01) { //Z = zero
-        if (z_flag) {
-        SP--; //move to next empty space in stack pointer
-        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
-        SP--; //stack grows downward
-        mem->write_memory (SP,PC & 0xFF);
-        PC = pair_registers(highbyte,lowbyte);
-        return 6;
-        }
-         else return 3;
+        if (z_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
     }
     
-
     else if (cc == 0b10) { //NC = not carry
-        if (!C_flag) {
-        SP--; //move to next empty space in stack pointer
-        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
-        SP--; //stack grows downward
-        mem->write_memory (SP,PC & 0xFF);
-        PC = pair_registers(highbyte,lowbyte);
-        return 6;
-        }
-         else return 3;
+        if (!C_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
     }
 
 
     else if (cc == 0b11) { //C = carry
-        if (C_flag) {
+        if (C_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
+    }
+
+    return 1;
+
+    }
+
+    else if (current_machine_cycle == 3) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 4) {
         SP--; //move to next empty space in stack pointer
-        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
-        SP--; //stack grows downward
+        mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte 
+        current_machine_cycle++;
+        return 1;  
+    }
+
+    else if (current_machine_cycle == 5) {
+         SP--; //stack grows downward
         mem->write_memory (SP,PC & 0xFF);
         PC = pair_registers(highbyte,lowbyte);
-        return 6;
-        }
-         else return 3;
+
+        fetch_new_instruction = true;
+        return 1;
     }
-    return 3; //just fr safety 
- }
+
+    }
 
  // ret : unconditional return from a function (1 byte cycle,4 machine cycle) 
  //opcode : 0b11001001
 
  else if (opcode == 0b11001001) {
-    uint8_t lowbyte = mem->read_memory(SP);
-    SP++;
-    uint8_t highbyte = mem->read_memory(SP);
-    SP++;
-    PC = pair_registers (highbyte,lowbyte);
-    return 4;
+
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        lowbyte = mem->read_memory(SP);
+        SP++;
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
+        highbyte = mem->read_memory(SP);
+        SP++;
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 3) {
+        PC = pair_registers (highbyte,lowbyte);
+        fetch_new_instruction = true;
+        return 1;
+    }
+
  }
 
  //ret cc : return from function conditional (1 byte cycle (5 machine cycle if cc true or 2 machine cycle if cc false))
@@ -2690,58 +3644,61 @@ uint32_t execute_opcode () {
     bool z_flag = get_flag('Z');
     bool C_flag = get_flag('C');
 
-    uint8_t cc = (opcode >> 3) & 0b00000011;
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        uint8_t cc = (opcode >> 3) & 0b00000011;
 
     if (cc == 0b00) { //NZ = not zero
-         if (!z_flag) {
-         uint8_t lowbyte = mem->read_memory(SP);
-         SP++;
-         uint8_t highbyte = mem->read_memory(SP);
-         SP++;
-         PC = pair_registers (highbyte,lowbyte);
-         return 5;
-        }
-         else return 2;
+         if (!z_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
     }
 
     else if (cc == 0b01) { //Z = zero
-        if (z_flag) {
-         uint8_t lowbyte = mem->read_memory(SP);
-         SP++;
-         uint8_t highbyte = mem->read_memory(SP);
-         SP++;
-         PC = pair_registers (highbyte,lowbyte);
-         return 5;
-        }
-         else return 2;
+        if (z_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
     }
     
 
     else if (cc == 0b10) { //NC = not carry
-        if (!C_flag) {
-         uint8_t lowbyte = mem->read_memory(SP);
-         SP++;
-         uint8_t highbyte = mem->read_memory(SP);
-         SP++;
-         PC = pair_registers (highbyte,lowbyte);
-         return 5;
-        }
-         else return 2;
+        if (!C_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
     }
 
 
     else if (cc == 0b11) { //C = carry
-        if (C_flag) {
-         uint8_t lowbyte = mem->read_memory(SP);
-         SP++;
-         uint8_t highbyte = mem->read_memory(SP);
-         SP++;
-         PC = pair_registers (highbyte,lowbyte);
-         return 5;
-        }
-         else return 2;
+        if (C_flag) current_machine_cycle++;
+         else fetch_new_instruction = true;
     }
-    return 2; //just fr safety 
+
+    return 1;
+
+    }
+
+    else if (current_machine_cycle == 2) {
+         lowbyte = mem->read_memory(SP);
+         SP++;
+         current_machine_cycle++;
+         return 1;
+    }
+
+    else if (current_machine_cycle == 3) {
+         highbyte = mem->read_memory(SP);
+         SP++;
+         current_machine_cycle++;
+         return 1;
+    }
+
+    else if (current_machine_cycle == 4) {
+         PC = pair_registers (highbyte,lowbyte);
+         fetch_new_instruction = true;
+         return 1;
+    }
+
+    
  }
 
  //reti : return from interupt handler -> unconditional return from a function also sets ime to 1 
@@ -2749,14 +3706,33 @@ uint32_t execute_opcode () {
  //opcode = 0b11011001
 
  else if (opcode == 0b11011001) {
-    uint8_t lowbyte = mem->read_memory(SP);
-    SP++;
-    uint8_t highbyte = mem->read_memory(SP);
-    SP++;
-    PC = pair_registers (highbyte,lowbyte);
 
-    IME = true;
-    return 4;
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        lowbyte = mem->read_memory(SP);
+        SP++;
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
+        highbyte = mem->read_memory(SP);
+        SP++;
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 3) {
+        PC = pair_registers (highbyte,lowbyte);
+        IME = true;
+        fetch_new_instruction = true;
+        return 1;
+    }
+   
  }
 
  //RST n : restart / call function (implied)   (1 byte cycle,4 machine cycle)
@@ -2766,22 +3742,40 @@ uint32_t execute_opcode () {
  else if ((opcode & 0b11000000) == 0b11000000 && (opcode & 0b00000111) == 0b00000111) {
     uint8_t adress = (opcode >> 3) & 0b00000111;
 
+    if (current_machine_cycle == 0) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 1) {
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 2) {
         SP--; //move to next empty space in stack pointer
         mem->write_memory(SP,(PC >> 8) & 0xFF); //writting high byte
-        SP--; //stack grows downward
+        current_machine_cycle++;
+        return 1;
+    }
+
+    else if (current_machine_cycle == 3) {
+         SP--; //stack grows downward
         mem->write_memory (SP,PC & 0xFF);
 
-    if (adress == 0b000) PC = 0x0000; // RST 00
-    else if (adress == 0b001) PC = 0x0008; // RST 08
-    else if (adress == 0b010) PC = 0x0010; // RST 10
-    else if (adress == 0b011) PC = 0x0018; // RST 18
-    else if (adress == 0b100) PC = 0x0020; // RST 20
-    else if (adress == 0b101) PC = 0x0028; // RST 28
-    else if (adress == 0b110) PC = 0x0030; // RST 30
-    else if (adress == 0b111) PC = 0x0038; // RST 38
+     if (adress == 0b000) PC = 0x0000; // RST 00
+     else if (adress == 0b001) PC = 0x0008; // RST 08
+     else if (adress == 0b010) PC = 0x0010; // RST 10
+     else if (adress == 0b011) PC = 0x0018; // RST 18
+     else if (adress == 0b100) PC = 0x0020; // RST 20
+     else if (adress == 0b101) PC = 0x0028; // RST 28
+     else if (adress == 0b110) PC = 0x0030; // RST 30
+     else if (adress == 0b111) PC = 0x0038; // RST 38
 
-    return 4;
-
+     fetch_new_instruction = true;
+     return 1;
+    }
+       
  }
 
  // miscellaneous instructions : 
@@ -2794,6 +3788,7 @@ uint32_t execute_opcode () {
  else if (opcode == 0b11110011) {
     IME = false;
     IME_scheduled = false; // also disables EI schedule
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2802,6 +3797,7 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b11111011) {
     IME_scheduled = true;
+    fetch_new_instruction = true;
     return 1;
  }
 
@@ -2810,16 +3806,18 @@ uint32_t execute_opcode () {
 
  else if (opcode == 0b00000000){
     //nothing
+    fetch_new_instruction = true;
     return 1;
  }
 
  else if (opcode == 0x10) {
     //stop
-    
+    //fetch_new_instruction = true;
     return 0;
  }
 
 std::cout << "unimplemented opcode : " << std::hex << +opcode << std::endl;
+fetch_new_instruction = true;
  return 1;
 }//function end
 
@@ -2889,6 +3887,7 @@ int cpu_cycle() {
 
     if (IME_scheduled) {
         ei_delay = 4;
+        IME_scheduled = false;
     }
 
     handle_interupt(); // check if we can service an interupt
@@ -3384,7 +4383,6 @@ void clock_tick () {
         if (CPU.IME_scheduled) {
             if (!CPU.ei_delay) {
                 CPU.IME = true;
-                CPU.IME_scheduled = false;
             }
             else CPU.ei_delay--;
         }
